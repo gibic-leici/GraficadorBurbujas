@@ -1,0 +1,12 @@
+# Logs & OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Editors / IDE
+.vscode/
+.idea/
+
+# Node / Dependencies (if added in the future)
+node_modules/
+dist/

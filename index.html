@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Graficador de señales ADC por puerto COM (CDC USB). 2 canales uint16_t, 200 muestras por paquete.">
+    <title>Graficador ADC — 2 Canales</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="layout">
+
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h1>ADC Monitor</h1>
+                <p>2 ch · uint16 · 100 muestras/ch/paquete</p>
+            </div>
+
+            <!-- Conexión -->
+            <div class="section">
+                <label class="section-label">Puerto Serie</label>
+                <button id="btn-connect" class="btn btn-primary">Conectar</button>
+                <button id="btn-disconnect" class="btn btn-danger hidden">Desconectar</button>
+                <div class="status-row">
+                    <span id="status-dot" class="dot dot-off"></span>
+                    <span id="status-text">Desconectado</span>
+                    <span id="recording-dot" class="dot dot-rec hidden"></span>
+                    <span id="recording-text" class="hidden">Grabando</span>
+                </div>
+            </div>
+
+            <!-- Tasa efectiva -->
+            <div class="section">
+                <label class="section-label">Recepción</label>
+                <div class="kv-list">
+                    <span>Paquetes/s</span><span id="rate-pkts" class="mono">—</span>
+                    <span>Muestras/ch/s</span><span id="rate-samp" class="mono">—</span>
+                    <span>Errores sincro</span><span id="stat-errors" class="mono text-warn">0</span>
+                    <span>Polarización</span><span id="pol-status" class="badge-pol">—</span>
+                    <span>pkg_cnt</span><span id="pkg-cnt" class="mono">—</span>
+                </div>
+            </div>
+
+            <!-- Grabación CSV -->
+            <div class="section">
+                <label class="section-label">Registrador CSV</label>
+
+                <!-- Grabación manual -->
+                <button id="btn-record-start" class="btn btn-success" disabled>Grabar (manual)</button>
+                <button id="btn-record-stop" class="btn btn-warn hidden">Detener y guardar</button>
+
+                <!-- Grabación temporizada -->
+                <div class="range-row" style="align-items:flex-end">
+                    <div class="field">
+                        <label for="input-rec-duration">Duración (s)</label>
+                        <input type="number" id="input-rec-duration" class="input-num" value="10" min="1" step="1">
+                    </div>
+                    <button id="btn-record-timed" class="btn btn-success" disabled style="margin-bottom:0">Grabar N s</button>
+                </div>
+
+                <div class="kv-list" style="margin-top:4px">
+                    <span>Muestras grabadas</span><span id="stat-recorded" class="mono">0</span>
+                </div>
+            </div>
+
+            <!-- Ajustes de gráficos -->
+            <div class="section">
+                <label class="section-label">Escala Y</label>
+                <div class="kv-list">
+                    <span>Autoescala</span>
+                    <label class="switch">
+                        <input type="checkbox" id="chk-autoscale" checked>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <div class="range-row">
+                    <div class="field">
+                        <label for="input-ymin">Min</label>
+                        <input type="number" id="input-ymin" class="input-num" value="0" disabled>
+                    </div>
+                    <div class="field">
+                        <label for="input-ymax">Max</label>
+                        <input type="number" id="input-ymax" class="input-num" value="65535" disabled>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Visualización -->
+            <div class="section">
+                <label class="section-label">Visualización</label>
+                <div class="range-row">
+                    <div class="field">
+                        <label for="input-history">Buffer (muestras)</label>
+                        <input type="number" id="input-history" class="input-num" value="5000" min="200" max="200000" step="100">
+                    </div>
+                    <div class="field">
+                        <label for="input-decim">Decimación</label>
+                        <input type="number" id="input-decim" class="input-num" value="10" min="1" max="1000" step="1">
+                    </div>
+                </div>
+                <p class="help-text">Puntos dibujados ≈ buffer ÷ decimación</p>
+            </div>
+
+        </aside>
+
+        <!-- Charts -->
+        <main class="charts">
+            <article class="chart-card">
+                <div class="chart-header">
+                    <span class="ch-dot dot-ch1"></span>
+                    <h2>Canal 1</h2>
+                    <span class="val-badge" id="val-ch1">—</span>
+                    <span class="pp-label">P-P:</span>
+                    <span class="val-badge secondary" id="pp-ch1">—</span>
+                </div>
+                <div class="canvas-wrap">
+                    <canvas id="canvas-ch1"></canvas>
+                </div>
+            </article>
+
+            <article class="chart-card">
+                <div class="chart-header">
+                    <span class="ch-dot dot-ch2"></span>
+                    <h2>Canal 2</h2>
+                    <span class="val-badge" id="val-ch2">—</span>
+                    <span class="pp-label">P-P:</span>
+                    <span class="val-badge secondary" id="pp-ch2">—</span>
+                </div>
+                <div class="canvas-wrap">
+                    <canvas id="canvas-ch2"></canvas>
+                </div>
+            </article>
+        </main>
+
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
