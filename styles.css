@@ -169,7 +169,7 @@ html, body { height: 100%; font-family: var(--font); background: var(--bg); colo
     gap: 6px;
 }
 
-.btn-freq {
+.btn-freq, .btn-avg {
     width: 100%;
     padding: 6px 2px;
     border: 1px solid var(--border);
@@ -184,14 +184,14 @@ html, body { height: 100%; font-family: var(--font); background: var(--bg); colo
     transition: all .15s ease;
 }
 
-.btn-freq:not(:disabled):hover {
+.btn-freq:not(:disabled):hover, .btn-avg:not(:disabled):hover {
     border-color: var(--accent1);
     color: var(--accent1);
     background: rgba(79, 156, 249, 0.1);
     opacity: 1;
 }
 
-.btn-freq.active {
+.btn-freq.active, .btn-avg.active {
     background: var(--accent1);
     border-color: var(--accent1);
     color: #fff;
@@ -199,12 +199,12 @@ html, body { height: 100%; font-family: var(--font); background: var(--bg); colo
     box-shadow: 0 0 8px rgba(79, 156, 249, 0.35);
 }
 
-.btn-freq:disabled {
+.btn-freq:disabled, .btn-avg:disabled {
     opacity: .35;
     cursor: not-allowed;
 }
 
-.btn-freq:disabled:active {
+.btn-freq:disabled:active, .btn-avg:disabled:active {
     transform: none;
 }
 

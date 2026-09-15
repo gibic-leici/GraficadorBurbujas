@@ -32,7 +32,7 @@ let syncErrors = 0;
 let currentSamplesPerPeriod = null;
 let currentClockPrescaler = null;
 let currentFreqExc = null;
-let isSendingFrequency = false;
+let isSendingCommand = false;
 
 let isRecording = false, recordedBuffer = [], recordStartTime = 0;
 let recordTimer = null;   // Para grabación temporizada
@@ -63,6 +63,7 @@ const statSamplesPerPeriod = $('stat-samples-per-period');
 const statClockPrescaler = $('stat-clock-prescaler');
 const statFreqExc = $('stat-freq-exc');
 const freqButtons = document.querySelectorAll('.btn-freq');
+const avgButtons = document.querySelectorAll('.btn-avg');
 const chkAuto = $('chk-autoscale');
 const inputYMin = $('input-ymin');
 const inputYMax = $('input-ymax');
@@ -130,6 +131,13 @@ function setupEvents() {
             if (freqHz) setExcitationFrequency(freqHz);
         });
     });
+
+    avgButtons.forEach(btn => {
+        btn.addEventListener('click', () => {
+            const avgVal = parseInt(btn.dataset.avg, 10);
+            if (avgVal) setAveraging(avgVal);
+        });
+    });
 }
 
 // ── Conexión serie ────────────────────────────────────────────────────────────
@@ -155,12 +163,12 @@ async function setExcitationFrequency(freqHz) {
         console.warn('No se puede cambiar frecuencia: puerto serie no conectado.');
         return;
     }
-    if (isSendingFrequency) {
-        console.warn('Ya hay un cambio de frecuencia en progreso.');
+    if (isSendingCommand) {
+        console.warn('Ya hay un comando en progreso.');
         return;
     }
-    isSendingFrequency = true;
-    updateFreqButtonsState();
+    isSendingCommand = true;
+    updateCommandButtonsState();
 
     try {
         console.log(`Configurando frecuencia de excitación: ${freqHz} Hz...`);
@@ -173,15 +181,47 @@ async function setExcitationFrequency(freqHz) {
     } catch (err) {
         console.error('Error al configurar frecuencia de excitación:', err.message);
     } finally {
-        isSendingFrequency = false;
-        updateFreqButtonsState();
+        isSendingCommand = false;
+        updateCommandButtonsState();
     }
 }
 
-function updateFreqButtonsState() {
+async function setAveraging(avgVal) {
+    if (!serialPort || !serialPort.writable || !keepReading) {
+        console.warn('No se puede cambiar promediado: puerto serie no conectado.');
+        return;
+    }
+    if (isSendingCommand) {
+        console.warn('Ya hay un comando en progreso.');
+        return;
+    }
+    isSendingCommand = true;
+    updateCommandButtonsState();
+
+    try {
+        console.log(`Configurando promediado: ${avgVal}...`);
+        await sendSerialCommand(`avg=${avgVal}\r\n`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        if (keepReading && serialPort?.writable) {
+            await sendSerialCommand("start\r\n");
+            console.log(`Promediado aplicado: ${avgVal}.`);
+        }
+        highlightActiveAvgButton(avgVal);
+    } catch (err) {
+        console.error('Error al configurar promediado:', err.message);
+    } finally {
+        isSendingCommand = false;
+        updateCommandButtonsState();
+    }
+}
+
+function updateCommandButtonsState() {
     const isConnected = !!(serialPort && keepReading);
     freqButtons.forEach(btn => {
-        btn.disabled = !isConnected || isSendingFrequency;
+        btn.disabled = !isConnected || isSendingCommand;
+    });
+    avgButtons.forEach(btn => {
+        btn.disabled = !isConnected || isSendingCommand;
     });
 }
 
@@ -201,6 +241,18 @@ function highlightActiveFreqButton(freqHz) {
     });
 }
 
+function highlightActiveAvgButton(avgVal) {
+    if (!avgButtons) return;
+    avgButtons.forEach(btn => {
+        const targetAvg = parseInt(btn.dataset.avg, 10);
+        if (avgVal === targetAvg) {
+            btn.classList.add('active');
+        } else {
+            btn.classList.remove('active');
+        }
+    });
+}
+
 async function connectSerial() {
     try {
         serialPort = await navigator.serial.requestPort();
@@ -211,7 +263,7 @@ async function connectSerial() {
         readLoop();
 
         // Secuencia de inicialización
-        await setExcitationFrequency(20000);
+        await setAveraging(1);
     } catch (e) {
         console.error('Error al conectar:', e.message);
     }
@@ -375,6 +427,7 @@ function resetConfigDisplay() {
         statFreqExc.removeAttribute('title');
     }
     highlightActiveFreqButton(null);
+    highlightActiveAvgButton(null);
 }
 
 // ── Grabación CSV ─────────────────────────────────────────────────────────────
@@ -555,7 +608,7 @@ function setConnected(on) {
         updateRateStats();
         resetConfigDisplay();
     }
-    updateFreqButtonsState();
+    updateCommandButtonsState();
 }
 
 // ── Redimensionar historial ───────────────────────────────────────────────────
