@@ -1,24 +1,26 @@
 /**
- * Graficador ADC — 2 canales uint16_t via CDC USB (puerto COM)
+ * Graficador ADC — 2 canales int16_t via CDC USB (puerto COM)
  *
  * Protocolo:
- *   typedef struct { uint32_t head; int32_t pkg_count; uint16_t adc_buffer[200]; } dato_t;
- *   head = 0xA5A5A5A5
- *   pkg_count: entero con signo de 4 bytes (int32_t)
- *     > 0 → Polarización Positiva
- *     < 0 → Polarización Negativa
- *   adc_buffer intercalado: [ch1, ch2, ch1, ch2, ...] → 100 muestras por canal
- *   Tamaño paquete: 4 + 4 + 200×2 = 408 bytes
+ *   Transmisión firmware:
+ *     1) Header: "\xA5\xA5\xA5\xA5" (4 bytes) -> 0xA5A5A5A5
+ *     2) samples_per_period: uint16_t (2 bytes, little-endian)
+ *     3) clock_prescaler: uint16_t (2 bytes, little-endian)
+ *     4) avg_0: int16_t[MAX_BUFFER_LEN] -> Canal 1
+ *     5) avg_1: int16_t[MAX_BUFFER_LEN] -> Canal 2
+ *   Tamaño paquete: HEADER_SIZE + CONFIG_SIZE + NUM_CH * (MAX_BUFFER_LEN * SAMPLE_SIZE)
  */
 
 // ── Configuración del protocolo ─────────────────────────────────────────────
 const BAUD_RATE = 115200;   // Irrelevante para CDC USB
-const NSAMP = 200;      // Muestras totales intercaladas en el paquete
 const NUM_CH = 2;
-const SAMPLES_PCH = NSAMP / NUM_CH;   // 100 muestras por canal por paquete
+const MAX_BUFFER_LEN = 256;// modifico para la diferencia entre semiciclos positivos y negativos 256; // Muestras por canal transmitidas en el paquete
+const SAMPLES_PCH = MAX_BUFFER_LEN;   // Muestras por canal por paquete
 const HEADER_SIZE = 4;
-const PKG_COUNT_SIZE = 4;
-const PACKET_SIZE = HEADER_SIZE + PKG_COUNT_SIZE + NSAMP * 2;  // 408 bytes
+const CONFIG_SIZE = 4;      // 2 bytes samples_per_period + 2 bytes clock_prescaler
+const SAMPLE_SIZE = 2;      // int16_t (2 bytes con signo)
+const CH_BUFFER_SIZE = MAX_BUFFER_LEN * SAMPLE_SIZE; // Bytes por canal
+const PACKET_SIZE = HEADER_SIZE + CONFIG_SIZE + NUM_CH * CH_BUFFER_SIZE;
 
 const CH_COLORS = ['#4f9cf9', '#f97f4f'];
 const CH_GRADIENTS = ['rgba(79,156,249,0.07)', 'rgba(249,127,79,0.07)'];
@@ -27,15 +29,17 @@ const CH_GRADIENTS = ['rgba(79,156,249,0.07)', 'rgba(249,127,79,0.07)'];
 let serialPort = null, reader = null, keepReading = false;
 let byteBuffer = [];
 let syncErrors = 0;
-let currentPolarization = null; // 'Positiva' | 'Negativa' | null
-let currentPkgCnt = null;
+let currentSamplesPerPeriod = null;
+let currentClockPrescaler = null;
+let currentFreqExc = null;
+let isSendingFrequency = false;
 
 let isRecording = false, recordedBuffer = [], recordStartTime = 0;
 let recordTimer = null;   // Para grabación temporizada
 
 let packetTimestamps = [];
-let isAutoscale = true, yMin = 0, yMax = 65535;
-let histLen = 5000, decimFactor = 10;
+let isAutoscale = false, yMin = 0, yMax = 5000;
+let histLen = 500, decimFactor = 1;
 let histories = [new Array(histLen).fill(0), new Array(histLen).fill(0)];
 let writeIdx = 0;
 
@@ -55,8 +59,10 @@ const ratePkts = $('rate-pkts');
 const rateSamp = $('rate-samp');
 const statErrors = $('stat-errors');
 const statRecorded = $('stat-recorded');
-const polStatus = $('pol-status');
-const pkgCntDisplay = $('pkg-cnt') || $('stat-pkg-cnt');
+const statSamplesPerPeriod = $('stat-samples-per-period');
+const statClockPrescaler = $('stat-clock-prescaler');
+const statFreqExc = $('stat-freq-exc');
+const freqButtons = document.querySelectorAll('.btn-freq');
 const chkAuto = $('chk-autoscale');
 const inputYMin = $('input-ymin');
 const inputYMax = $('input-ymax');
@@ -105,11 +111,11 @@ function setupEvents() {
         inputYMin.disabled = inputYMax.disabled = isAutoscale;
     });
     inputYMin.addEventListener('input', () => { yMin = +inputYMin.value || 0; });
-    inputYMax.addEventListener('input', () => { yMax = +inputYMax.value || 65535; });
+    inputYMax.addEventListener('input', () => { yMax = +inputYMax.value || 0; });
 
     inputHist.addEventListener('change', () => {
         const n = parseInt(inputHist.value);
-        if (n >= 200 && n <= 200000) resizeHistory(n);
+        if (n >= 64 && n <= 200000) resizeHistory(n);
         else inputHist.value = histLen;
     });
     inputDecim.addEventListener('change', () => {
@@ -117,9 +123,84 @@ function setupEvents() {
         decimFactor = (n >= 1 && n <= 1000) ? n : decimFactor;
         inputDecim.value = decimFactor;
     });
+
+    freqButtons.forEach(btn => {
+        btn.addEventListener('click', () => {
+            const freqHz = parseInt(btn.dataset.freq, 10);
+            if (freqHz) setExcitationFrequency(freqHz);
+        });
+    });
 }
 
 // ── Conexión serie ────────────────────────────────────────────────────────────
+async function sendSerialCommand(cmd) {
+    if (!serialPort || !serialPort.writable) {
+        console.warn('No se puede enviar comando: puerto serie no disponible para escritura.');
+        return;
+    }
+    const encoder = new TextEncoder();
+    const writer = serialPort.writable.getWriter();
+    try {
+        await writer.write(encoder.encode(cmd));
+        console.log(`Comando serie enviado: ${JSON.stringify(cmd)}`);
+    } catch (err) {
+        console.error('Error al enviar comando serie:', err.message);
+    } finally {
+        writer.releaseLock();
+    }
+}
+
+async function setExcitationFrequency(freqHz) {
+    if (!serialPort || !serialPort.writable || !keepReading) {
+        console.warn('No se puede cambiar frecuencia: puerto serie no conectado.');
+        return;
+    }
+    if (isSendingFrequency) {
+        console.warn('Ya hay un cambio de frecuencia en progreso.');
+        return;
+    }
+    isSendingFrequency = true;
+    updateFreqButtonsState();
+
+    try {
+        console.log(`Configurando frecuencia de excitación: ${freqHz} Hz...`);
+        await sendSerialCommand(`fexc=${freqHz}\r\n`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        if (keepReading && serialPort?.writable) {
+            await sendSerialCommand("start\r\n");
+            console.log(`Frecuencia de excitación aplicada: ${freqHz} Hz.`);
+        }
+    } catch (err) {
+        console.error('Error al configurar frecuencia de excitación:', err.message);
+    } finally {
+        isSendingFrequency = false;
+        updateFreqButtonsState();
+    }
+}
+
+function updateFreqButtonsState() {
+    const isConnected = !!(serialPort && keepReading);
+    freqButtons.forEach(btn => {
+        btn.disabled = !isConnected || isSendingFrequency;
+    });
+}
+
+function highlightActiveFreqButton(freqHz) {
+    if (!freqButtons) return;
+    freqButtons.forEach(btn => {
+        if (!freqHz) {
+            btn.classList.remove('active');
+            return;
+        }
+        const targetHz = parseInt(btn.dataset.freq, 10);
+        if (targetHz && Math.abs(freqHz - targetHz) / targetHz < 0.03) {
+            btn.classList.add('active');
+        } else {
+            btn.classList.remove('active');
+        }
+    });
+}
+
 async function connectSerial() {
     try {
         serialPort = await navigator.serial.requestPort();
@@ -128,6 +209,9 @@ async function connectSerial() {
         setConnected(true);
         keepReading = true;
         readLoop();
+
+        // Secuencia de inicialización
+        await setExcitationFrequency(20000);
     } catch (e) {
         console.error('Error al conectar:', e.message);
     }
@@ -176,15 +260,24 @@ function handleBytes(chunk) {
 
             const packetBytes = new Uint8Array(byteBuffer.slice(0, PACKET_SIZE));
             const dv = new DataView(packetBytes.buffer);
-            const pkgCnt = dv.getInt32(HEADER_SIZE, true);
 
-            // Desinterleaving: índices pares → ch1, impares → ch2
+            // Leer configuración (uint16_t, little-endian)
+            const samplesPerPeriod = dv.getUint16(HEADER_SIZE, true);
+            const clockPrescaler = dv.getUint16(HEADER_SIZE + 2, true);
+
+            // Leer buffers contiguos de int16_t (avg_0 y avg_1)
             const ch = [[], []];
-            for (let i = 0; i < NSAMP; i++) {
-                ch[i % NUM_CH].push(dv.getUint16(HEADER_SIZE + PKG_COUNT_SIZE + i * 2, true));
+            let offset = HEADER_SIZE + CONFIG_SIZE; // offset 8
+            for (let i = 0; i < MAX_BUFFER_LEN; i++) {
+                ch[0].push(dv.getInt16(offset, true));
+                offset += SAMPLE_SIZE;
+            }
+            for (let i = 0; i < MAX_BUFFER_LEN; i++) {
+                ch[1].push(dv.getInt16(offset, true));
+                offset += SAMPLE_SIZE;
             }
 
-            processPacket(ch, pkgCnt);
+            processPacket(ch, samplesPerPeriod, clockPrescaler);
             packetTimestamps.push({ t: performance.now(), n: SAMPLES_PCH });
             byteBuffer.splice(0, PACKET_SIZE);
 
@@ -209,10 +302,8 @@ function handleBytes(chunk) {
     }
 }
 
-function processPacket(ch, pkgCnt) {
-    const now = Date.now();
-
-    // Ingresar las 100 muestras de cada canal al historial circular
+function processPacket(ch, samplesPerPeriod, clockPrescaler) {
+    // Ingresar las 256 muestras de cada canal al historial circular
     for (let s = 0; s < SAMPLES_PCH; s++) {
         for (let c = 0; c < NUM_CH; c++) histories[c][writeIdx] = ch[c][s];
         writeIdx = (writeIdx + 1) % histLen;
@@ -223,8 +314,8 @@ function processPacket(ch, pkgCnt) {
         valBadges[c].textContent = ch[c][SAMPLES_PCH - 1];
     }
 
-    // Actualizar estado de polarización y contador de paquetes
-    updatePolarization(pkgCnt);
+    // Actualizar configuración en pantalla
+    updateConfigDisplay(samplesPerPeriod, clockPrescaler);
 
     // Grabar si está activo
     if (isRecording) {
@@ -235,38 +326,55 @@ function processPacket(ch, pkgCnt) {
     }
 }
 
-function updatePolarization(pkgCnt) {
-    currentPkgCnt = pkgCnt;
-    if (pkgCntDisplay) {
-        pkgCntDisplay.textContent = (pkgCnt > 0 ? '+' : '') + pkgCnt;
+function updateConfigDisplay(samplesPerPeriod, clockPrescaler) {
+    currentSamplesPerPeriod = samplesPerPeriod;
+    currentClockPrescaler = clockPrescaler;
+
+    if (statSamplesPerPeriod) {
+        statSamplesPerPeriod.textContent = samplesPerPeriod;
+    }
+    if (statClockPrescaler) {
+        statClockPrescaler.textContent = clockPrescaler;
     }
 
-    let newPol = null;
-    if (pkgCnt > 0) {
-        newPol = 'Positiva';
-    } else if (pkgCnt < 0) {
-        newPol = 'Negativa';
-    }
-
-    if (newPol && newPol !== currentPolarization) {
-        currentPolarization = newPol;
-        if (polStatus) {
-            polStatus.textContent = newPol === 'Positiva' ? 'Positiva (+)' : 'Negativa (−)';
-            polStatus.className = 'badge-pol ' + (newPol === 'Positiva' ? 'positive' : 'negative');
+    if (samplesPerPeriod > 0 && clockPrescaler > 0) {
+        const freqHz = 72e6 / samplesPerPeriod / clockPrescaler;
+        currentFreqExc = freqHz;
+        if (statFreqExc) {
+            if (freqHz >= 1000) {
+                const khz = freqHz / 1000;
+                statFreqExc.textContent = `${khz.toFixed(2)} kHz`;
+            } else {
+                statFreqExc.textContent = `${Math.round(freqHz)} Hz`;
+            }
+            statFreqExc.title = `${freqHz.toFixed(1)} Hz`;
         }
+        highlightActiveFreqButton(freqHz);
+    } else {
+        currentFreqExc = null;
+        if (statFreqExc) {
+            statFreqExc.textContent = '—';
+            statFreqExc.removeAttribute('title');
+        }
+        highlightActiveFreqButton(null);
     }
 }
 
-function resetPolarization() {
-    currentPolarization = null;
-    currentPkgCnt = null;
-    if (polStatus) {
-        polStatus.textContent = '—';
-        polStatus.className = 'badge-pol';
+function resetConfigDisplay() {
+    currentSamplesPerPeriod = null;
+    currentClockPrescaler = null;
+    currentFreqExc = null;
+    if (statSamplesPerPeriod) {
+        statSamplesPerPeriod.textContent = '—';
     }
-    if (pkgCntDisplay) {
-        pkgCntDisplay.textContent = '—';
+    if (statClockPrescaler) {
+        statClockPrescaler.textContent = '—';
     }
+    if (statFreqExc) {
+        statFreqExc.textContent = '—';
+        statFreqExc.removeAttribute('title');
+    }
+    highlightActiveFreqButton(null);
 }
 
 // ── Grabación CSV ─────────────────────────────────────────────────────────────
@@ -445,8 +553,9 @@ function setConnected(on) {
     if (!on) {
         packetTimestamps = [];
         updateRateStats();
-        resetPolarization();
+        resetConfigDisplay();
     }
+    updateFreqButtonsState();
 }
 
 // ── Redimensionar historial ───────────────────────────────────────────────────

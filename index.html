@@ -1,15 +1,18 @@
 <!DOCTYPE html>
 <html lang="es">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="Graficador de señales ADC por puerto COM (CDC USB). 2 canales uint16_t, 200 muestras por paquete.">
+    <meta name="description"
+        content="Graficador de señales ADC por puerto COM (CDC USB). 2 canales int16_t, 256 muestras por canal por paquete.">
     <title>Graficador ADC — 2 Canales</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="styles.css">
 </head>
+
 <body>
     <div class="layout">
 
@@ -17,7 +20,7 @@
         <aside class="sidebar">
             <div class="sidebar-header">
                 <h1>ADC Monitor</h1>
-                <p>2 ch · uint16 · 100 muestras/ch/paquete</p>
+                <p>2 ch · int16 · 256 muestras/ch/paquete</p>
             </div>
 
             <!-- Conexión -->
@@ -40,8 +43,25 @@
                     <span>Paquetes/s</span><span id="rate-pkts" class="mono">—</span>
                     <span>Muestras/ch/s</span><span id="rate-samp" class="mono">—</span>
                     <span>Errores sincro</span><span id="stat-errors" class="mono text-warn">0</span>
-                    <span>Polarización</span><span id="pol-status" class="badge-pol">—</span>
-                    <span>pkg_cnt</span><span id="pkg-cnt" class="mono">—</span>
+                    <span>Cuentas/período</span><span id="stat-samples-per-period" class="mono">—</span>
+                    <span>Prescaler reloj</span><span id="stat-clock-prescaler" class="mono">—</span>
+                    <span>Frec. excitación</span><span id="stat-freq-exc" class="mono">—</span>
+                </div>
+            </div>
+
+            <!-- Frecuencia de Excitación -->
+            <div class="section">
+                <label class="section-label">Frecuencia Excitación</label>
+                <div class="freq-grid">
+                    <button class="btn btn-freq" data-freq="5000" disabled>5 kHz</button>
+                    <button class="btn btn-freq" data-freq="10000" disabled>10 kHz</button>
+                    <button class="btn btn-freq" data-freq="15000" disabled>15 kHz</button>
+                    <button class="btn btn-freq" data-freq="20000" disabled>20 kHz</button>
+                    <button class="btn btn-freq" data-freq="30000" disabled>30 kHz</button>
+                    <button class="btn btn-freq" data-freq="40000" disabled>40 kHz</button>
+                    <button class="btn btn-freq" data-freq="50000" disabled>50 kHz</button>
+                    <button class="btn btn-freq" data-freq="75000" disabled>75 kHz</button>
+                    <button class="btn btn-freq" data-freq="100000" disabled>100 kHz</button>
                 </div>
             </div>
 
@@ -59,7 +79,8 @@
                         <label for="input-rec-duration">Duración (s)</label>
                         <input type="number" id="input-rec-duration" class="input-num" value="10" min="1" step="1">
                     </div>
-                    <button id="btn-record-timed" class="btn btn-success" disabled style="margin-bottom:0">Grabar N s</button>
+                    <button id="btn-record-timed" class="btn btn-success" disabled style="margin-bottom:0">Grabar N
+                        s</button>
                 </div>
 
                 <div class="kv-list" style="margin-top:4px">
@@ -73,18 +94,18 @@
                 <div class="kv-list">
                     <span>Autoescala</span>
                     <label class="switch">
-                        <input type="checkbox" id="chk-autoscale" checked>
+                        <input type="checkbox" id="chk-autoscale">
                         <span class="slider"></span>
                     </label>
                 </div>
                 <div class="range-row">
                     <div class="field">
                         <label for="input-ymin">Min</label>
-                        <input type="number" id="input-ymin" class="input-num" value="0" disabled>
+                        <input type="number" id="input-ymin" class="input-num" value="0">
                     </div>
                     <div class="field">
                         <label for="input-ymax">Max</label>
-                        <input type="number" id="input-ymax" class="input-num" value="65535" disabled>
+                        <input type="number" id="input-ymax" class="input-num" value="5000">
                     </div>
                 </div>
             </div>
@@ -95,11 +116,12 @@
                 <div class="range-row">
                     <div class="field">
                         <label for="input-history">Buffer (muestras)</label>
-                        <input type="number" id="input-history" class="input-num" value="5000" min="200" max="200000" step="100">
+                        <input type="number" id="input-history" class="input-num" value="500" min="64" max="200000"
+                            step="1">
                     </div>
                     <div class="field">
                         <label for="input-decim">Decimación</label>
-                        <input type="number" id="input-decim" class="input-num" value="10" min="1" max="1000" step="1">
+                        <input type="number" id="input-decim" class="input-num" value="1" min="1" max="1000" step="1">
                     </div>
                 </div>
                 <p class="help-text">Puntos dibujados ≈ buffer ÷ decimación</p>
@@ -139,4 +161,5 @@
     </div>
     <script src="app.js"></script>
 </body>
+
 </html>
