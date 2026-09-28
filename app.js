@@ -3,7 +3,7 @@
  *
  * Protocolo:
  *   Transmisión firmware:
- *     1) Header: "\xA5\xA5\xA5\xA5" (4 bytes) -> 0xA5A5A5A5
+ *     1) Header: "\xA5\xA5\xA5" (3 bytes sync) + 1 byte camera_flag (0/1)
  *     2) samples_per_period: uint16_t (2 bytes, little-endian)
  *     3) clock_prescaler: uint16_t (2 bytes, little-endian)
  *     4) avg_0: int16_t[MAX_BUFFER_LEN] -> Canal 1
@@ -33,6 +33,7 @@ let currentSamplesPerPeriod = null;
 let currentClockPrescaler = null;
 let currentFreqExc = null;
 let isSendingCommand = false;
+let isCameraRecording = false;
 
 let isRecording = false, recordedBuffer = [], recordStartTime = 0;
 let recordTimer = null;   // Para grabación temporizada
@@ -65,6 +66,8 @@ const statRecorded = $('stat-recorded');
 const statSamplesPerPeriod = $('stat-samples-per-period');
 const statClockPrescaler = $('stat-clock-prescaler');
 const statFreqExc = $('stat-freq-exc');
+const cameraDot = $('camera-dot');
+const cameraText = $('camera-text');
 const freqButtons = document.querySelectorAll('.btn-freq');
 const avgButtons = document.querySelectorAll('.btn-avg');
 const modeButtons = document.querySelectorAll('.btn-mode');
@@ -303,7 +306,10 @@ function handleBytes(chunk) {
 
     while (byteBuffer.length >= PACKET_SIZE) {
         if (byteBuffer[0] === 0xA5 && byteBuffer[1] === 0xA5 &&
-            byteBuffer[2] === 0xA5 && byteBuffer[3] === 0xA5) {
+            byteBuffer[2] === 0xA5 && (byteBuffer[3] === 0x00 || byteBuffer[3] === 0x01)) {
+
+            const cameraFlag = byteBuffer[3];
+            updateCameraIndicator(cameraFlag === 1);
 
             const packetBytes = new Uint8Array(byteBuffer.slice(0, PACKET_SIZE));
             const dv = new DataView(packetBytes.buffer);
@@ -333,7 +339,7 @@ function handleBytes(chunk) {
             let idx = -1;
             for (let i = 1; i <= byteBuffer.length - HEADER_SIZE; i++) {
                 if (byteBuffer[i] === 0xA5 && byteBuffer[i + 1] === 0xA5 &&
-                    byteBuffer[i + 2] === 0xA5 && byteBuffer[i + 3] === 0xA5) {
+                    byteBuffer[i + 2] === 0xA5 && (byteBuffer[i + 3] === 0x00 || byteBuffer[i + 3] === 0x01)) {
                     idx = i; break;
                 }
             }
@@ -403,7 +409,7 @@ function processPacket(ch, samplesPerPeriod, clockPrescaler) {
     // Grabar si está activo
     if (isRecording) {
         for (let s = 0; s < SAMPLES_PCH; s++) {
-            recordedBuffer.push([ch[0][s], ch[1][s]]);
+            recordedBuffer.push([ch[0][s], ch[1][s], isCameraRecording ? 1 : 0]);
         }
         statRecorded.textContent = recordedBuffer.length;
     }
@@ -500,7 +506,7 @@ function stopRecording() {
 
     if (!recordedBuffer.length) { console.warn('Sin datos para guardar.'); return; }
 
-    let csv = 'Ch1;Ch2\r\n';
+    let csv = 'Ch1;Ch2;Cam\r\n';
     for (const row of recordedBuffer) csv += row.join(';') + '\r\n';
 
     const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
@@ -616,7 +622,15 @@ function drawCharts() {
     }
 }
 
-// ── Estado de conexión ────────────────────────────────────────────────────────
+// ── Indicador de cámara ────────────────────────────────────────────────────────────────
+function updateCameraIndicator(isOn) {
+    if (isOn === isCameraRecording) return;
+    isCameraRecording = isOn;
+    cameraDot.className = 'dot ' + (isOn ? 'dot-cam' : 'dot-off');
+    cameraText.textContent = isOn ? 'Cámara: Grabando' : 'Cámara: Off';
+}
+
+// ── Estado de conexión ────────────────────────────────────────────────────────────────
 function setConnected(on) {
     statusDot.className = 'dot ' + (on ? 'dot-on' : 'dot-off');
     statusText.textContent = on ? 'Conectado' : 'Desconectado';
@@ -638,6 +652,7 @@ function setConnected(on) {
         packetTimestamps = [];
         updateRateStats();
         resetConfigDisplay();
+        updateCameraIndicator(false);
     }
     updateCommandButtonsState();
 }
