@@ -42,6 +42,9 @@ let isAutoscale = false, yMin = 0, yMax = 5000;
 let histLen = 500, decimFactor = 1;
 let histories = [new Array(histLen).fill(0), new Array(histLen).fill(0)];
 let writeIdx = 0;
+let viewMode = 'amplitud';
+let currentAveraging = 1;
+let maHistory = [[], []];
 
 // ── DOM ──────────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -64,6 +67,7 @@ const statClockPrescaler = $('stat-clock-prescaler');
 const statFreqExc = $('stat-freq-exc');
 const freqButtons = document.querySelectorAll('.btn-freq');
 const avgButtons = document.querySelectorAll('.btn-avg');
+const modeButtons = document.querySelectorAll('.btn-mode');
 const chkAuto = $('chk-autoscale');
 const inputYMin = $('input-ymin');
 const inputYMax = $('input-ymax');
@@ -134,8 +138,31 @@ function setupEvents() {
 
     avgButtons.forEach(btn => {
         btn.addEventListener('click', () => {
-            const avgVal = parseInt(btn.dataset.avg, 10);
-            if (avgVal) setAveraging(avgVal);
+            currentAveraging = parseInt(btn.dataset.avg, 10);
+            avgButtons.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            
+            maHistory[0] = maHistory[0].slice(-currentAveraging);
+            maHistory[1] = maHistory[1].slice(-currentAveraging);
+            
+            histories = [new Array(histLen).fill(0), new Array(histLen).fill(0)];
+            writeIdx = 0;
+        });
+    });
+
+    modeButtons.forEach(btn => {
+        btn.addEventListener('click', () => {
+            viewMode = btn.dataset.mode;
+            modeButtons.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            
+            const isCruda = viewMode === 'cruda';
+            avgButtons.forEach(b => b.disabled = isCruda);
+            
+            maHistory = [[], []];
+            
+            histories = [new Array(histLen).fill(0), new Array(histLen).fill(0)];
+            writeIdx = 0;
         });
     });
 }
@@ -186,41 +213,9 @@ async function setExcitationFrequency(freqHz) {
     }
 }
 
-async function setAveraging(avgVal) {
-    if (!serialPort || !serialPort.writable || !keepReading) {
-        console.warn('No se puede cambiar promediado: puerto serie no conectado.');
-        return;
-    }
-    if (isSendingCommand) {
-        console.warn('Ya hay un comando en progreso.');
-        return;
-    }
-    isSendingCommand = true;
-    updateCommandButtonsState();
-
-    try {
-        console.log(`Configurando promediado: ${avgVal}...`);
-        await sendSerialCommand(`avg=${avgVal}\r\n`);
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        if (keepReading && serialPort?.writable) {
-            await sendSerialCommand("start\r\n");
-            console.log(`Promediado aplicado: ${avgVal}.`);
-        }
-        highlightActiveAvgButton(avgVal);
-    } catch (err) {
-        console.error('Error al configurar promediado:', err.message);
-    } finally {
-        isSendingCommand = false;
-        updateCommandButtonsState();
-    }
-}
-
 function updateCommandButtonsState() {
     const isConnected = !!(serialPort && keepReading);
     freqButtons.forEach(btn => {
-        btn.disabled = !isConnected || isSendingCommand;
-    });
-    avgButtons.forEach(btn => {
         btn.disabled = !isConnected || isSendingCommand;
     });
 }
@@ -263,7 +258,7 @@ async function connectSerial() {
         readLoop();
 
         // Secuencia de inicialización
-        await setAveraging(1);
+        await setExcitationFrequency(20000);
     } catch (e) {
         console.error('Error al conectar:', e.message);
     }
@@ -355,15 +350,51 @@ function handleBytes(chunk) {
 }
 
 function processPacket(ch, samplesPerPeriod, clockPrescaler) {
-    // Ingresar las 256 muestras de cada canal al historial circular
-    for (let s = 0; s < SAMPLES_PCH; s++) {
-        for (let c = 0; c < NUM_CH; c++) histories[c][writeIdx] = ch[c][s];
+    let rawOutCh = [[], []];
+    let outSamples = 0;
+
+    if (viewMode === 'cruda') {
+        rawOutCh = ch;
+        outSamples = SAMPLES_PCH;
+    } else {
+        outSamples = Math.floor(SAMPLES_PCH / 2);
+        for (let j = 0; j < outSamples; j++) {
+            if (viewMode === 'amplitud') {
+                rawOutCh[0].push(ch[0][j * 2 + 1] - ch[0][j * 2]);
+                rawOutCh[1].push(ch[1][j * 2 + 1] - ch[1][j * 2]);
+            } else if (viewMode === 'comun') {
+                rawOutCh[0].push((ch[0][j * 2 + 1] + ch[0][j * 2]) / 2);
+                rawOutCh[1].push((ch[1][j * 2 + 1] + ch[1][j * 2]) / 2);
+            }
+        }
+    }
+
+    let outCh = [[], []];
+    if (viewMode === 'cruda') {
+        outCh = rawOutCh;
+    } else {
+        for (let c = 0; c < NUM_CH; c++) {
+            for (let s = 0; s < outSamples; s++) {
+                maHistory[c].push(rawOutCh[c][s]);
+                if (maHistory[c].length > currentAveraging) {
+                    maHistory[c].shift();
+                }
+                let sum = 0;
+                for (let i = 0; i < maHistory[c].length; i++) sum += maHistory[c][i];
+                outCh[c].push(sum / maHistory[c].length);
+            }
+        }
+    }
+
+    // Ingresar las muestras de cada canal al historial circular
+    for (let s = 0; s < outSamples; s++) {
+        for (let c = 0; c < NUM_CH; c++) histories[c][writeIdx] = outCh[c][s];
         writeIdx = (writeIdx + 1) % histLen;
     }
 
     // Mostrar último valor de cada canal
     for (let c = 0; c < NUM_CH; c++) {
-        valBadges[c].textContent = ch[c][SAMPLES_PCH - 1];
+        valBadges[c].textContent = outSamples > 0 ? Math.round(outCh[c][outSamples - 1]) : "—";
     }
 
     // Actualizar configuración en pantalla

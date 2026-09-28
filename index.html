@@ -66,11 +66,11 @@
             <div class="section">
                 <label class="section-label">Promediado</label>
                 <div class="freq-grid">
-                    <button class="btn btn-avg" data-avg="1" disabled>1</button>
-                    <button class="btn btn-avg" data-avg="2" disabled>2</button>
-                    <button class="btn btn-avg" data-avg="4" disabled>4</button>
-                    <button class="btn btn-avg" data-avg="8" disabled>8</button>
-                    <button class="btn btn-avg" data-avg="16" disabled>16</button>
+                    <button class="btn btn-avg active" data-avg="1">1</button>
+                    <button class="btn btn-avg" data-avg="2">2</button>
+                    <button class="btn btn-avg" data-avg="4">4</button>
+                    <button class="btn btn-avg" data-avg="8">8</button>
+                    <button class="btn btn-avg" data-avg="16">16</button>
                 </div>
             </div>
 
@@ -94,6 +94,16 @@
 
                 <div class="kv-list" style="margin-top:4px">
                     <span>Muestras grabadas</span><span id="stat-recorded" class="mono">0</span>
+                </div>
+            </div>
+
+            <!-- Modo de Señal -->
+            <div class="section">
+                <label class="section-label">Modo de Señal</label>
+                <div class="freq-grid">
+                    <button class="btn btn-mode" data-mode="cruda">Cruda</button>
+                    <button class="btn btn-mode active" data-mode="amplitud">Amplitud</button>
+                    <button class="btn btn-mode" data-mode="comun">Común</button>
                 </div>
             </div>
 
