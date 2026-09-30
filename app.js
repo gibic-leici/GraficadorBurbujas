@@ -3,7 +3,7 @@
  *
  * Protocolo:
  *   Transmisión firmware:
- *     1) Header: "\xA5\xA5\xA5" (3 bytes sync) + 1 byte camera_flag (0/1)
+ *     1) Header: "\xA5\xA5" (2 bytes sync) + 2 bytes camera_flag (0/1) + amplitud_excitacion (15 bits superiores)
  *     2) samples_per_period: uint16_t (2 bytes, little-endian)
  *     3) clock_prescaler: uint16_t (2 bytes, little-endian)
  *     4) avg_0: int16_t[MAX_BUFFER_LEN] -> Canal 1
@@ -46,6 +46,7 @@ let writeIdx = 0;
 let viewMode = 'amplitud';
 let currentAveraging = 1;
 let maHistory = [[], []];
+let amplitudeExcitation = 0;
 
 // ── DOM ──────────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -76,6 +77,7 @@ const inputYMin = $('input-ymin');
 const inputYMax = $('input-ymax');
 const inputHist = $('input-history');
 const inputDecim = $('input-decim');
+const statAmpExc = $('stat-amp-exc');
 
 const canvases = [$('canvas-ch1'), $('canvas-ch2')];
 const ctxs = canvases.map(c => c.getContext('2d'));
@@ -144,10 +146,10 @@ function setupEvents() {
             currentAveraging = parseInt(btn.dataset.avg, 10);
             avgButtons.forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
-            
+
             maHistory[0] = maHistory[0].slice(-currentAveraging);
             maHistory[1] = maHistory[1].slice(-currentAveraging);
-            
+
             histories = [new Array(histLen).fill(0), new Array(histLen).fill(0)];
             writeIdx = 0;
         });
@@ -158,12 +160,12 @@ function setupEvents() {
             viewMode = btn.dataset.mode;
             modeButtons.forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
-            
+
             const isCruda = viewMode === 'cruda';
             avgButtons.forEach(b => b.disabled = isCruda);
-            
+
             maHistory = [[], []];
-            
+
             histories = [new Array(histLen).fill(0), new Array(histLen).fill(0)];
             writeIdx = 0;
         });
@@ -203,7 +205,7 @@ async function setExcitationFrequency(freqHz) {
     try {
         console.log(`Configurando frecuencia de excitación: ${freqHz} Hz...`);
         await sendSerialCommand(`fexc=${freqHz}\r\n`);
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await new Promise(resolve => setTimeout(resolve, 2000));
         if (keepReading && serialPort?.writable) {
             await sendSerialCommand("start\r\n");
             console.log(`Frecuencia de excitación aplicada: ${freqHz} Hz.`);
@@ -305,11 +307,14 @@ function handleBytes(chunk) {
     for (let i = 0; i < chunk.length; i++) byteBuffer.push(chunk[i]);
 
     while (byteBuffer.length >= PACKET_SIZE) {
-        if (byteBuffer[0] === 0xA5 && byteBuffer[1] === 0xA5 &&
-            byteBuffer[2] === 0xA5 && (byteBuffer[3] === 0x00 || byteBuffer[3] === 0x01)) {
+        if (byteBuffer[0] === 0xA5 && byteBuffer[1] === 0xA5) {
 
-            const cameraFlag = byteBuffer[3];
+            const cameraFlag = byteBuffer[2] & 0x01;
             updateCameraIndicator(cameraFlag === 1);
+
+            amplitudeExcitation = ((byteBuffer[3] << 7) | (byteBuffer[2] >> 1)) & 0x7FFF;
+            statAmpExc.textContent = amplitudeExcitation;
+            //console.log(`Amplitud de excitación: ${amplitudeExcitation}`);
 
             const packetBytes = new Uint8Array(byteBuffer.slice(0, PACKET_SIZE));
             const dv = new DataView(packetBytes.buffer);
@@ -338,8 +343,7 @@ function handleBytes(chunk) {
             // Buscar siguiente header
             let idx = -1;
             for (let i = 1; i <= byteBuffer.length - HEADER_SIZE; i++) {
-                if (byteBuffer[i] === 0xA5 && byteBuffer[i + 1] === 0xA5 &&
-                    byteBuffer[i + 2] === 0xA5 && (byteBuffer[i + 3] === 0x00 || byteBuffer[i + 3] === 0x01)) {
+                if (byteBuffer[i] === 0xA5 && byteBuffer[i + 1] === 0xA5) {
                     idx = i; break;
                 }
             }
@@ -366,11 +370,11 @@ function processPacket(ch, samplesPerPeriod, clockPrescaler) {
         outSamples = Math.floor(SAMPLES_PCH / 2);
         for (let j = 0; j < outSamples; j++) {
             if (viewMode === 'amplitud') {
-                rawOutCh[0].push(ch[0][j * 2 + 1] - ch[0][j * 2]);
-                rawOutCh[1].push(ch[1][j * 2 + 1] - ch[1][j * 2]);
+                rawOutCh[0].push(Math.abs(ch[0][j * 2 + 1] - ch[0][j * 2]));
+                rawOutCh[1].push(Math.abs(ch[1][j * 2 + 1] - ch[1][j * 2]));
             } else if (viewMode === 'comun') {
-                rawOutCh[0].push((ch[0][j * 2 + 1] + ch[0][j * 2]) / 2);
-                rawOutCh[1].push((ch[1][j * 2 + 1] + ch[1][j * 2]) / 2);
+                rawOutCh[0].push(Math.abs((ch[0][j * 2 + 1] + ch[0][j * 2]) / 2));
+                rawOutCh[1].push(Math.abs((ch[1][j * 2 + 1] + ch[1][j * 2]) / 2));
             }
         }
     }
@@ -407,9 +411,17 @@ function processPacket(ch, samplesPerPeriod, clockPrescaler) {
     updateConfigDisplay(samplesPerPeriod, clockPrescaler);
 
     // Grabar si está activo
+    // outSamples = Math.floor(SAMPLES_PCH / 2);
+    //    for (let j = 0; j < outSamples; j++) {
+    //        if (viewMode === 'amplitud') {
+    //            rawOutCh[0].push(ch[0][j * 2 + 1] - ch[0][j * 2]);
+    //            rawOutCh[1].push(ch[1][j * 2 + 1] - ch[1][j * 2]);
     if (isRecording) {
-        for (let s = 0; s < SAMPLES_PCH; s++) {
-            recordedBuffer.push([ch[0][s], ch[1][s], isCameraRecording ? 1 : 0]);
+        outSamples = Math.floor(SAMPLES_PCH / 2);
+        for (let j = 0; j < outSamples; j++) {
+            //for (let s = 0; s < SAMPLES_PCH; s++) {
+            recordedBuffer.push([Math.abs(ch[0][j * 2 + 1] - ch[0][j * 2]), Math.abs(ch[1][j * 2 + 1] - ch[1][j * 2]), isCameraRecording ? 1 : 0]);
+            //            recordedBuffer.push([ch[0][s], ch[1][s], isCameraRecording ? 1 : 0]);
         }
         statRecorded.textContent = recordedBuffer.length;
     }
@@ -476,6 +488,9 @@ function startRecording(durationMs = null) {
     btnRecTimed.classList.add('hidden');
     btnRecStop.classList.remove('hidden');
 
+    setExcitationFrequency(20000);
+    delay(1000);
+
     if (durationMs) {
         const secs = (durationMs / 1000).toFixed(1);
         recText.textContent = `Grabando ${secs}s`;
@@ -506,7 +521,7 @@ function stopRecording() {
 
     if (!recordedBuffer.length) { console.warn('Sin datos para guardar.'); return; }
 
-    let csv = 'Ch1;Ch2;Cam\r\n';
+    let csv = '# freq_exc: ' + currentFreqExc + '; amplitude_exc: ' + amplitudeExcitation + ';\r\nCh1;Ch2;Cam\r\n';
     for (const row of recordedBuffer) csv += row.join(';') + '\r\n';
 
     const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
