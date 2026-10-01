@@ -39,7 +39,7 @@ let isRecording = false, recordedBuffer = [], recordStartTime = 0;
 let recordTimer = null;   // Para grabación temporizada
 
 let packetTimestamps = [];
-let isAutoscale = false, yMin = 0, yMax = 5000;
+let isAutoscale = false, yMin = 0, yMax = 4096;
 let histLen = 500, decimFactor = 1;
 let histories = [new Array(histLen).fill(0), new Array(histLen).fill(0)];
 let writeIdx = 0;
