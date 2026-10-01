@@ -28,15 +28,19 @@
                 <label class="section-label">Puerto Serie</label>
                 <button id="btn-connect" class="btn btn-primary">Conectar</button>
                 <button id="btn-disconnect" class="btn btn-danger hidden">Desconectar</button>
-                <div class="status-row">
-                    <span id="status-dot" class="dot dot-off"></span>
-                    <span id="status-text">Desconectado</span>
-                    <span id="recording-dot" class="dot dot-rec hidden"></span>
-                    <span id="recording-text" class="hidden">Grabando</span>
-                </div>
-                <div class="status-row">
-                    <span id="camera-dot" class="dot dot-off"></span>
-                    <span id="camera-text">Cámara: Off</span>
+                <div class="status-panel">
+                    <div class="status-row">
+                        <span id="status-dot" class="dot dot-off"></span>
+                        <span id="status-text">Desconectado</span>
+                    </div>
+                    <div class="status-row status-rec-row">
+                        <span id="recording-dot" class="dot dot-rec hidden"></span>
+                        <span id="recording-text" class="hidden">Grabando</span>
+                    </div>
+                    <div class="status-row">
+                        <span id="camera-dot" class="dot dot-off"></span>
+                        <span id="camera-text">Cámara: Off</span>
+                    </div>
                 </div>
             </div>
 
@@ -55,7 +59,7 @@
             </div>
 
             <!-- Frecuencia de Excitación -->
-            <div class="section">
+            <div class="section" style="display: none;">
                 <label class="section-label">Frecuencia Excitación</label>
                 <div class="freq-grid">
                     <button class="btn btn-freq" data-freq="10000" disabled>10 kHz</button>

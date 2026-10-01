@@ -253,19 +253,78 @@ function highlightActiveAvgButton(avgVal) {
     });
 }
 
+// ── Dispositivo objetivo ──────────────────────────────────────────────────────
+const TARGET_DEVICE_NAME = 'Medidor de Burbujas';
+const TARGET_USB_VID = 1155;    // 0x0483 (STMicroelectronics)
+const TARGET_USB_PID = 22336;   // 0x5740 (Virtual COM Port)
+
+function isMedidorDeBurbujas(port) {
+    if (!port) return false;
+    const info = (typeof port.getInfo === 'function') ? port.getInfo() : {};
+
+    // Coincidencia con Vendor ID y Product ID del firmware STM32
+    if (info.usbVendorId === TARGET_USB_VID && info.usbProductId === TARGET_USB_PID) {
+        return true;
+    }
+
+    // Coincidencia con nombre textual si el navegador o sistema lo reporta
+    const candidateStrings = [
+        info.productName,
+        info.usbProductName,
+        info.name,
+        info.friendlyName,
+        info.description,
+        port.name
+    ];
+    for (const text of candidateStrings) {
+        if (typeof text === 'string' && text.toLowerCase().includes(TARGET_DEVICE_NAME.toLowerCase())) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+async function openSerialPort(port) {
+    serialPort = port;
+    await serialPort.open({ baudRate: BAUD_RATE });
+    console.log('Puerto serie conectado.');
+    setConnected(true);
+    keepReading = true;
+    readLoop();
+
+    // Secuencia de inicialización
+    await setExcitationFrequency(20000);
+}
+
 async function connectSerial() {
     try {
-        serialPort = await navigator.serial.requestPort();
-        await serialPort.open({ baudRate: BAUD_RATE });
-        console.log('Puerto serie conectado.');
-        setConnected(true);
-        keepReading = true;
-        readLoop();
+        // 1. Si ya se concedió permiso previamente, verificar si "Medidor de Burbujas" está disponible
+        if ('serial' in navigator) {
+            const availablePorts = await navigator.serial.getPorts();
+            const matchedPort = availablePorts.find(isMedidorDeBurbujas);
+            if (matchedPort) {
+                try {
+                    console.log(`Puerto "${TARGET_DEVICE_NAME}" detectado automáticamente. Conectando directamente...`);
+                    await openSerialPort(matchedPort);
+                    return;
+                } catch (openErr) {
+                    console.warn(`No se pudo conectar directamente al puerto "${TARGET_DEVICE_NAME}":`, openErr.message);
+                }
+            }
+        }
 
-        // Secuencia de inicialización
-        await setExcitationFrequency(20000);
+        // 2. Si no se encontró directamente o no se pudo abrir, solicitar selección al usuario
+        const requestedPort = await navigator.serial.requestPort();
+        if (requestedPort) {
+            await openSerialPort(requestedPort);
+        }
     } catch (e) {
-        console.error('Error al conectar:', e.message);
+        if (e.name === 'NotFoundError') {
+            console.log('Selección de puerto serie cancelada por el usuario.');
+        } else {
+            console.error('Error al conectar:', e.message);
+        }
     }
 }
 
