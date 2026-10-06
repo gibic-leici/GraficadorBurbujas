@@ -15,9 +15,6 @@
   .ok{color:#6c6}.err{color:#f77}
   pre{white-space:pre-wrap;word-break:break-all;margin:0;font-size:.85rem}
   li{margin:6px 0}
-  details.help{background:#2b2410;border:1px solid #6b5a1e;border-radius:8px;padding:10px;margin:10px 0;font-size:.9rem}
-  details.help summary{cursor:pointer;font-weight:600}
-  details.help ol{margin:8px 0 0;padding-left:20px}
 </style>
 </head>
 <body>
@@ -32,16 +29,6 @@
 
 <button id="btnPick">Elegir puerto…</button>
 <button id="btnRefresh" class="sec">Ver puertos ya autorizados</button>
-
-<details class="help" id="help">
-  <summary>¿No aparece ningún dispositivo? Revisá esto</summary>
-  <ol>
-    <li><b>Permiso de Chrome:</b> Ajustes de Android → Apps → Chrome → Permisos → <i>Dispositivos cercanos</i> → Permitir (en Android antiguo: <i>Ubicación</i>). Reiniciá Chrome después de cambiarlo.</li>
-    <li><b>Bluetooth activado</b> y el módulo (HC-05) encendido, cerca y ya emparejado en Ajustes → Bluetooth.</li>
-    <li>Probá con la casilla <i>Sin filtro</i> por si el módulo usa otro UUID.</li>
-    <li>Chrome actualizado (versión 137 o superior).</li>
-  </ol>
-</details>
 
 <div class="box"><b>Puertos autorizados</b><ul id="list"></ul></div>
 <div class="box"><b>Log</b><pre id="log"></pre></div>
@@ -118,12 +105,6 @@ $('btnPick').onclick = async () => {
     await renderList();
   } catch (e) {
     log(e.name + ': ' + e.message, 'err');
-    if (e.name === 'NotFoundError') {
-      // El usuario cerró el selector o no había dispositivos compatibles.
-      $('help').open = true;
-      $('help').scrollIntoView({ behavior: 'smooth', block: 'center' });
-      log('No se eligió ningún puerto. Si el selector estaba vacío, revisá el panel de ayuda.');
-    }
   }
 };
 
