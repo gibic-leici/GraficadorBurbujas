@@ -6,29 +6,37 @@
  *     1) Header: "\xA5\xA5" (2 bytes sync) + 2 bytes camera_flag (0/1) + amplitud_excitacion (15 bits superiores)
  *     2) samples_per_period: uint16_t (2 bytes, little-endian)
  *     3) clock_prescaler: uint16_t (2 bytes, little-endian)
- *     4) avg_0: int16_t[MAX_BUFFER_LEN] -> Canal 1
- *     5) avg_1: int16_t[MAX_BUFFER_LEN] -> Canal 2
- *   Tamaño paquete: HEADER_SIZE + CONFIG_SIZE + NUM_CH * (MAX_BUFFER_LEN * SAMPLE_SIZE)
+ *     4) seq: uint32_t (4 bytes, little-endian) contador de paquete
+ *     5) ch0: int16_t[MAX_BUFFER_LEN] -> Canal 1 (256 muestras = 512 bytes)
+ *     6) ch1: int16_t[MAX_BUFFER_LEN] -> Canal 2 (256 muestras = 512 bytes)
+ *   Tamaño paquete: HEADER_SIZE + CONFIG_SIZE + SEQ_SIZE + NUM_CH * (MAX_BUFFER_LEN * SAMPLE_SIZE) = 1036 B
  */
 
 // ── Configuración del protocolo ─────────────────────────────────────────────
 const BAUD_RATE = 115200;   // Irrelevante para CDC USB
 const NUM_CH = 2;
-const MAX_BUFFER_LEN = 256;// modifico para la diferencia entre semiciclos positivos y negativos 256; // Muestras por canal transmitidas en el paquete
+const MAX_BUFFER_LEN = 256; // Muestras por canal transmitidas en el paquete
 const SAMPLES_PCH = MAX_BUFFER_LEN;   // Muestras por canal por paquete
 const HEADER_SIZE = 4;
 const CONFIG_SIZE = 4;      // 2 bytes samples_per_period + 2 bytes clock_prescaler
+const SEQ_SIZE = 4;         // 4 bytes uint32_t seq (contador de paquete)
 const SAMPLE_SIZE = 2;      // int16_t (2 bytes con signo)
-const CH_BUFFER_SIZE = MAX_BUFFER_LEN * SAMPLE_SIZE; // Bytes por canal
-const PACKET_SIZE = HEADER_SIZE + CONFIG_SIZE + NUM_CH * CH_BUFFER_SIZE;
+const CH_BUFFER_SIZE = MAX_BUFFER_LEN * SAMPLE_SIZE; // Bytes por canal (512 B)
+const PACKET_SIZE = HEADER_SIZE + CONFIG_SIZE + SEQ_SIZE + NUM_CH * CH_BUFFER_SIZE; // 1036 B
 
 const CH_COLORS = ['#4f9cf9', '#f97f4f'];
 const CH_GRADIENTS = ['rgba(79,156,249,0.07)', 'rgba(249,127,79,0.07)'];
+
+// ── Utilidades ───────────────────────────────────────────────────────────────
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // ── Estado ───────────────────────────────────────────────────────────────────
 let serialPort = null, reader = null, keepReading = false;
 let byteBuffer = [];
 let syncErrors = 0;
+let lostPackets = 0;
+let lastPacketSeq = null;
+let lastProcessedSample = null;
 let currentSamplesPerPeriod = null;
 let currentClockPrescaler = null;
 let currentFreqExc = null;
@@ -63,6 +71,8 @@ const recText = $('recording-text');
 const ratePkts = $('rate-pkts');
 const rateSamp = $('rate-samp');
 const statErrors = $('stat-errors');
+const statLostPkts = $('stat-lost-pkts');
+const statSeq = $('stat-seq');
 const statRecorded = $('stat-recorded');
 const statSamplesPerPeriod = $('stat-samples-per-period');
 const statClockPrescaler = $('stat-clock-prescaler');
@@ -289,6 +299,10 @@ async function openSerialPort(port) {
     serialPort = port;
     await serialPort.open({ baudRate: BAUD_RATE });
     console.log('Puerto serie conectado.');
+    byteBuffer = [];
+    syncErrors = 0;
+    if (statErrors) statErrors.textContent = '0';
+    resetLostPackets();
     setConnected(true);
     keepReading = true;
     readLoop();
@@ -381,10 +395,25 @@ function handleBytes(chunk) {
             // Leer configuración (uint16_t, little-endian)
             const samplesPerPeriod = dv.getUint16(HEADER_SIZE, true);
             const clockPrescaler = dv.getUint16(HEADER_SIZE + 2, true);
+            // Leer número de secuencia (uint32_t, little-endian)
+            const packetSeq = dv.getUint32(HEADER_SIZE + CONFIG_SIZE, true);
 
-            // Leer buffers contiguos de int16_t (avg_0 y avg_1)
+            // Detección de paquetes perdidos mediante seq
+            let lostInThisGap = 0;
+            if (lastPacketSeq !== null) {
+                const diff = (packetSeq - lastPacketSeq) >>> 0;
+                if (diff > 1 && diff <= 10000) {
+                    lostInThisGap = diff - 1;
+                    lostPackets += lostInThisGap;
+                }
+            }
+            lastPacketSeq = packetSeq;
+            if (statLostPkts) statLostPkts.textContent = lostPackets;
+            if (statSeq) statSeq.textContent = packetSeq;
+
+            // Leer buffers contiguos de int16_t (ch0 y ch1)
             const ch = [[], []];
-            let offset = HEADER_SIZE + CONFIG_SIZE; // offset 8
+            let offset = HEADER_SIZE + CONFIG_SIZE + SEQ_SIZE; // offset 12
             for (let i = 0; i < MAX_BUFFER_LEN; i++) {
                 ch[0].push(dv.getInt16(offset, true));
                 offset += SAMPLE_SIZE;
@@ -394,7 +423,7 @@ function handleBytes(chunk) {
                 offset += SAMPLE_SIZE;
             }
 
-            processPacket(ch, samplesPerPeriod, clockPrescaler);
+            processPacket(ch, samplesPerPeriod, clockPrescaler, lostInThisGap);
             packetTimestamps.push({ t: performance.now(), n: SAMPLES_PCH });
             byteBuffer.splice(0, PACKET_SIZE);
 
@@ -418,7 +447,7 @@ function handleBytes(chunk) {
     }
 }
 
-function processPacket(ch, samplesPerPeriod, clockPrescaler) {
+function processPacket(ch, samplesPerPeriod, clockPrescaler, lostInThisGap = 0) {
     let rawOutCh = [[], []];
     let outSamples = 0;
 
@@ -470,20 +499,56 @@ function processPacket(ch, samplesPerPeriod, clockPrescaler) {
     updateConfigDisplay(samplesPerPeriod, clockPrescaler);
 
     // Grabar si está activo
-    // outSamples = Math.floor(SAMPLES_PCH / 2);
-    //    for (let j = 0; j < outSamples; j++) {
-    //        if (viewMode === 'amplitud') {
-    //            rawOutCh[0].push(ch[0][j * 2 + 1] - ch[0][j * 2]);
-    //            rawOutCh[1].push(ch[1][j * 2 + 1] - ch[1][j * 2]);
     if (isRecording) {
-        outSamples = Math.floor(SAMPLES_PCH / 2);
-        for (let j = 0; j < outSamples; j++) {
-            //for (let s = 0; s < SAMPLES_PCH; s++) {
-            recordedBuffer.push([Math.abs(ch[0][j * 2 + 1] - ch[0][j * 2]), Math.abs(ch[1][j * 2 + 1] - ch[1][j * 2]), isCameraRecording ? 1 : 0]);
-            //            recordedBuffer.push([ch[0][s], ch[1][s], isCameraRecording ? 1 : 0]);
+        const SAMPLES_PER_FRAME = Math.floor(SAMPLES_PCH / 2); // 128 medidas de amplitud
+
+        // Si se perdieron paquetes previos, replicar la última muestra de cada item
+        if (lostInThisGap > 0) {
+            let fillCh0 = 0;
+            let fillCh1 = 0;
+            let fillCam = isCameraRecording ? 1 : 0;
+
+            if (recordedBuffer.length > 0) {
+                const lastRow = recordedBuffer[recordedBuffer.length - 1];
+                fillCh0 = lastRow[0];
+                fillCh1 = lastRow[1];
+                fillCam = lastRow[2];
+            } else if (lastProcessedSample !== null) {
+                fillCh0 = lastProcessedSample[0];
+                fillCh1 = lastProcessedSample[1];
+                fillCam = lastProcessedSample[2];
+            } else {
+                fillCh0 = Math.abs(ch[0][1] - ch[0][0]);
+                fillCh1 = Math.abs(ch[1][1] - ch[1][0]);
+                fillCam = isCameraRecording ? 1 : 0;
+            }
+
+            for (let p = 0; p < lostInThisGap; p++) {
+                for (let s = 0; s < SAMPLES_PER_FRAME; s++) {
+                    recordedBuffer.push([fillCh0, fillCh1, fillCam]);
+                }
+            }
+        }
+
+        // Registrar las 128 medidas de amplitud del paquete actual + sincronismo de la cámara
+        const currentCam = isCameraRecording ? 1 : 0;
+        for (let j = 0; j < SAMPLES_PER_FRAME; j++) {
+            recordedBuffer.push([
+                Math.abs(ch[0][j * 2 + 1] - ch[0][j * 2]),
+                Math.abs(ch[1][j * 2 + 1] - ch[1][j * 2]),
+                currentCam
+            ]);
         }
         statRecorded.textContent = recordedBuffer.length;
     }
+
+    // Actualizar última muestra procesada para replicar en caso de pérdida futura
+    const lastSampleIdx = Math.floor(SAMPLES_PCH / 2) - 1;
+    lastProcessedSample = [
+        Math.abs(ch[0][lastSampleIdx * 2 + 1] - ch[0][lastSampleIdx * 2]),
+        Math.abs(ch[1][lastSampleIdx * 2 + 1] - ch[1][lastSampleIdx * 2]),
+        isCameraRecording ? 1 : 0
+    ];
 }
 
 function updateConfigDisplay(samplesPerPeriod, clockPrescaler) {
@@ -727,8 +792,17 @@ function setConnected(on) {
         updateRateStats();
         resetConfigDisplay();
         updateCameraIndicator(false);
+        resetLostPackets();
     }
     updateCommandButtonsState();
+}
+
+function resetLostPackets() {
+    lostPackets = 0;
+    lastPacketSeq = null;
+    lastProcessedSample = null;
+    if (statLostPkts) statLostPkts.textContent = '0';
+    if (statSeq) statSeq.textContent = '—';
 }
 
 // ── Redimensionar historial ───────────────────────────────────────────────────
