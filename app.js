@@ -7,8 +7,8 @@
  *     2) samples_per_period: uint16_t (2 bytes, little-endian)
  *     3) clock_prescaler: uint16_t (2 bytes, little-endian)
  *     4) seq: uint32_t (4 bytes, little-endian) contador de paquete
- *     5) ch0: int16_t[MAX_BUFFER_LEN] -> Canal 1 (256 muestras = 512 bytes)
- *     6) ch1: int16_t[MAX_BUFFER_LEN] -> Canal 2 (256 muestras = 512 bytes)
+ *     5) ch0: int16_t[MAX_BUFFER_LEN] -> Canal 1 (256 muestras de amplitud = 512 bytes)
+ *     6) ch1: int16_t[MAX_BUFFER_LEN] -> Canal 2 (256 muestras de amplitud = 512 bytes)
  *   Tamaño paquete: HEADER_SIZE + CONFIG_SIZE + SEQ_SIZE + NUM_CH * (MAX_BUFFER_LEN * SAMPLE_SIZE) = 1036 B
  */
 
@@ -51,7 +51,6 @@ let isAutoscale = false, yMin = 0, yMax = 4096;
 let histLen = 500, decimFactor = 1;
 let histories = [new Array(histLen).fill(0), new Array(histLen).fill(0)];
 let writeIdx = 0;
-let viewMode = 'amplitud';
 let currentAveraging = 1;
 let maHistory = [[], []];
 let amplitudeExcitation = 0;
@@ -81,7 +80,6 @@ const cameraDot = $('camera-dot');
 const cameraText = $('camera-text');
 const freqButtons = document.querySelectorAll('.btn-freq');
 const avgButtons = document.querySelectorAll('.btn-avg');
-const modeButtons = document.querySelectorAll('.btn-mode');
 const chkAuto = $('chk-autoscale');
 const inputYMin = $('input-ymin');
 const inputYMax = $('input-ymax');
@@ -164,22 +162,6 @@ function setupEvents() {
             writeIdx = 0;
         });
     });
-
-    modeButtons.forEach(btn => {
-        btn.addEventListener('click', () => {
-            viewMode = btn.dataset.mode;
-            modeButtons.forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-
-            const isCruda = viewMode === 'cruda';
-            avgButtons.forEach(b => b.disabled = isCruda);
-
-            maHistory = [[], []];
-
-            histories = [new Array(histLen).fill(0), new Array(histLen).fill(0)];
-            writeIdx = 0;
-        });
-    });
 }
 
 // ── Conexión serie ────────────────────────────────────────────────────────────
@@ -218,6 +200,7 @@ async function setExcitationFrequency(freqHz) {
         await new Promise(resolve => setTimeout(resolve, 2000));
         if (keepReading && serialPort?.writable) {
             await sendSerialCommand("start\r\n");
+            lastPacketSeq = null;
             console.log(`Frecuencia de excitación aplicada: ${freqHz} Hz.`);
         }
     } catch (err) {
@@ -308,7 +291,13 @@ async function openSerialPort(port) {
     readLoop();
 
     // Secuencia de inicialización
-    await setExcitationFrequency(20000);
+    try {
+        await setExcitationFrequency(20000);
+    } finally {
+        resetLostPackets();
+        syncErrors = 0;
+        if (statErrors) statErrors.textContent = '0';
+    }
 }
 
 async function connectSerial() {
@@ -448,32 +437,15 @@ function handleBytes(chunk) {
 }
 
 function processPacket(ch, samplesPerPeriod, clockPrescaler, lostInThisGap = 0) {
-    let rawOutCh = [[], []];
-    let outSamples = 0;
-
-    if (viewMode === 'cruda') {
-        rawOutCh = ch;
-        outSamples = SAMPLES_PCH;
-    } else {
-        outSamples = Math.floor(SAMPLES_PCH / 2);
-        for (let j = 0; j < outSamples; j++) {
-            if (viewMode === 'amplitud') {
-                rawOutCh[0].push(Math.abs(ch[0][j * 2 + 1] - ch[0][j * 2]));
-                rawOutCh[1].push(Math.abs(ch[1][j * 2 + 1] - ch[1][j * 2]));
-            } else if (viewMode === 'comun') {
-                rawOutCh[0].push(Math.abs((ch[0][j * 2 + 1] + ch[0][j * 2]) / 2));
-                rawOutCh[1].push(Math.abs((ch[1][j * 2 + 1] + ch[1][j * 2]) / 2));
-            }
-        }
-    }
+    const outSamples = SAMPLES_PCH; // 256 muestras directas de amplitud
 
     let outCh = [[], []];
-    if (viewMode === 'cruda') {
-        outCh = rawOutCh;
+    if (currentAveraging <= 1) {
+        outCh = ch;
     } else {
         for (let c = 0; c < NUM_CH; c++) {
             for (let s = 0; s < outSamples; s++) {
-                maHistory[c].push(rawOutCh[c][s]);
+                maHistory[c].push(ch[c][s]);
                 if (maHistory[c].length > currentAveraging) {
                     maHistory[c].shift();
                 }
@@ -500,9 +472,9 @@ function processPacket(ch, samplesPerPeriod, clockPrescaler, lostInThisGap = 0) 
 
     // Grabar si está activo
     if (isRecording) {
-        const SAMPLES_PER_FRAME = Math.floor(SAMPLES_PCH / 2); // 128 medidas de amplitud
+        const SAMPLES_PER_FRAME = SAMPLES_PCH; // 256 muestras de amplitud
 
-        // Si se perdieron paquetes previos, replicar la última muestra de cada item
+        // Si se perdieron paquetes previos, replicar la última muestra (256 por paquete perdido)
         if (lostInThisGap > 0) {
             let fillCh0 = 0;
             let fillCh1 = 0;
@@ -518,8 +490,8 @@ function processPacket(ch, samplesPerPeriod, clockPrescaler, lostInThisGap = 0) 
                 fillCh1 = lastProcessedSample[1];
                 fillCam = lastProcessedSample[2];
             } else {
-                fillCh0 = Math.abs(ch[0][1] - ch[0][0]);
-                fillCh1 = Math.abs(ch[1][1] - ch[1][0]);
+                fillCh0 = Math.abs(ch[0][0]);
+                fillCh1 = Math.abs(ch[1][0]);
                 fillCam = isCameraRecording ? 1 : 0;
             }
 
@@ -530,12 +502,12 @@ function processPacket(ch, samplesPerPeriod, clockPrescaler, lostInThisGap = 0) 
             }
         }
 
-        // Registrar las 128 medidas de amplitud del paquete actual + sincronismo de la cámara
+        // Registrar las 256 medidas de amplitud del paquete actual (valor absoluto) + sincronismo de la cámara
         const currentCam = isCameraRecording ? 1 : 0;
         for (let j = 0; j < SAMPLES_PER_FRAME; j++) {
             recordedBuffer.push([
-                Math.abs(ch[0][j * 2 + 1] - ch[0][j * 2]),
-                Math.abs(ch[1][j * 2 + 1] - ch[1][j * 2]),
+                Math.abs(ch[0][j]),
+                Math.abs(ch[1][j]),
                 currentCam
             ]);
         }
@@ -543,10 +515,10 @@ function processPacket(ch, samplesPerPeriod, clockPrescaler, lostInThisGap = 0) 
     }
 
     // Actualizar última muestra procesada para replicar en caso de pérdida futura
-    const lastSampleIdx = Math.floor(SAMPLES_PCH / 2) - 1;
+    const lastSampleIdx = SAMPLES_PCH - 1;
     lastProcessedSample = [
-        Math.abs(ch[0][lastSampleIdx * 2 + 1] - ch[0][lastSampleIdx * 2]),
-        Math.abs(ch[1][lastSampleIdx * 2 + 1] - ch[1][lastSampleIdx * 2]),
+        Math.abs(ch[0][lastSampleIdx]),
+        Math.abs(ch[1][lastSampleIdx]),
         isCameraRecording ? 1 : 0
     ];
 }
