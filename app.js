@@ -32,7 +32,8 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // ── Estado ───────────────────────────────────────────────────────────────────
 let serialPort = null, reader = null, keepReading = false;
-let byteBuffer = [];
+let rxBuffer = new Uint8Array(65536);
+let rxLen = 0;
 let syncErrors = 0;
 let lostPackets = 0;
 let lastPacketSeq = null;
@@ -49,11 +50,13 @@ let recordTimer = null;   // Para grabación temporizada
 let packetTimestamps = [];
 let isAutoscale = false, yMin = 0, yMax = 4096;
 let histLen = 500, decimFactor = 1;
-let histories = [new Array(histLen).fill(0), new Array(histLen).fill(0)];
+let histories = [new Float32Array(histLen), new Float32Array(histLen)];
 let writeIdx = 0;
 let currentAveraging = 1;
 let maHistory = [[], []];
+let maSum = [0, 0];
 let amplitudeExcitation = 0;
+let lastAmplitudeExcitation = -1;
 
 // ── DOM ──────────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -86,6 +89,7 @@ const inputYMax = $('input-ymax');
 const inputHist = $('input-history');
 const inputDecim = $('input-decim');
 const statAmpExc = $('stat-amp-exc');
+const timeWindowHint = $('time-window-hint');
 
 const canvases = [$('canvas-ch1'), $('canvas-ch2')];
 const ctxs = canvases.map(c => c.getContext('2d'));
@@ -155,10 +159,10 @@ function setupEvents() {
             avgButtons.forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
 
-            maHistory[0] = maHistory[0].slice(-currentAveraging);
-            maHistory[1] = maHistory[1].slice(-currentAveraging);
+            maHistory = [[], []];
+            maSum = [0, 0];
 
-            histories = [new Array(histLen).fill(0), new Array(histLen).fill(0)];
+            histories = [new Float32Array(histLen), new Float32Array(histLen)];
             writeIdx = 0;
         });
     });
@@ -280,9 +284,13 @@ function isMedidorDeBurbujas(port) {
 
 async function openSerialPort(port) {
     serialPort = port;
-    await serialPort.open({ baudRate: BAUD_RATE });
+    try {
+        await serialPort.open({ baudRate: BAUD_RATE, bufferSize: 16384 });
+    } catch {
+        await serialPort.open({ baudRate: BAUD_RATE });
+    }
     console.log('Puerto serie conectado.');
-    byteBuffer = [];
+    rxLen = 0;
     syncErrors = 0;
     if (statErrors) statErrors.textContent = '0';
     resetLostPackets();
@@ -366,99 +374,116 @@ async function readLoop() {
 
 // ── Parser de paquetes ────────────────────────────────────────────────────────
 function handleBytes(chunk) {
-    for (let i = 0; i < chunk.length; i++) byteBuffer.push(chunk[i]);
+    if (rxLen + chunk.length > rxBuffer.length) {
+        const newBuf = new Uint8Array(Math.max(rxBuffer.length * 2, rxLen + chunk.length + 2048));
+        newBuf.set(rxBuffer.subarray(0, rxLen));
+        rxBuffer = newBuf;
+    }
+    rxBuffer.set(chunk, rxLen);
+    rxLen += chunk.length;
 
-    while (byteBuffer.length >= PACKET_SIZE) {
-        if (byteBuffer[0] === 0xA5 && byteBuffer[1] === 0xA5) {
-
-            const cameraFlag = byteBuffer[2] & 0x01;
-            updateCameraIndicator(cameraFlag === 1);
-
-            amplitudeExcitation = ((byteBuffer[3] << 7) | (byteBuffer[2] >> 1)) & 0x7FFF;
-            statAmpExc.textContent = amplitudeExcitation;
-            //console.log(`Amplitud de excitación: ${amplitudeExcitation}`);
-
-            const packetBytes = new Uint8Array(byteBuffer.slice(0, PACKET_SIZE));
-            const dv = new DataView(packetBytes.buffer);
-
-            // Leer configuración (uint16_t, little-endian)
-            const samplesPerPeriod = dv.getUint16(HEADER_SIZE, true);
-            const clockPrescaler = dv.getUint16(HEADER_SIZE + 2, true);
-            // Leer número de secuencia (uint32_t, little-endian)
-            const packetSeq = dv.getUint32(HEADER_SIZE + CONFIG_SIZE, true);
-
-            // Detección de paquetes perdidos mediante seq
-            let lostInThisGap = 0;
-            if (lastPacketSeq !== null) {
-                const diff = (packetSeq - lastPacketSeq) >>> 0;
-                if (diff > 1 && diff <= 10000) {
-                    lostInThisGap = diff - 1;
-                    lostPackets += lostInThisGap;
-                }
-            }
-            lastPacketSeq = packetSeq;
-            if (statLostPkts) statLostPkts.textContent = lostPackets;
-            if (statSeq) statSeq.textContent = packetSeq;
-
-            // Leer buffers contiguos de int16_t (ch0 y ch1)
-            const ch = [[], []];
-            let offset = HEADER_SIZE + CONFIG_SIZE + SEQ_SIZE; // offset 12
-            for (let i = 0; i < MAX_BUFFER_LEN; i++) {
-                ch[0].push(dv.getInt16(offset, true));
-                offset += SAMPLE_SIZE;
-            }
-            for (let i = 0; i < MAX_BUFFER_LEN; i++) {
-                ch[1].push(dv.getInt16(offset, true));
-                offset += SAMPLE_SIZE;
-            }
-
-            processPacket(ch, samplesPerPeriod, clockPrescaler, lostInThisGap);
-            packetTimestamps.push({ t: performance.now(), n: SAMPLES_PCH });
-            byteBuffer.splice(0, PACKET_SIZE);
-
+    let offset = 0;
+    while (rxLen - offset >= PACKET_SIZE) {
+        if (rxBuffer[offset] === 0xA5 && rxBuffer[offset + 1] === 0xA5) {
+            parsePacketAt(offset);
+            offset += PACKET_SIZE;
         } else {
-            // Buscar siguiente header
-            let idx = -1;
-            for (let i = 1; i <= byteBuffer.length - HEADER_SIZE; i++) {
-                if (byteBuffer[i] === 0xA5 && byteBuffer[i + 1] === 0xA5) {
-                    idx = i; break;
+            // Buscar siguiente cabecera 0xA5 0xA5
+            let nextSync = -1;
+            for (let i = offset + 1; i <= rxLen - 2; i++) {
+                if (rxBuffer[i] === 0xA5 && rxBuffer[i + 1] === 0xA5) {
+                    nextSync = i;
+                    break;
                 }
             }
-            if (idx !== -1) {
-                byteBuffer.splice(0, idx);
+            if (nextSync !== -1) {
                 syncErrors++;
-                statErrors.textContent = syncErrors;
+                if (statErrors) statErrors.textContent = syncErrors;
+                offset = nextSync;
             } else {
-                byteBuffer = byteBuffer.slice(-3);
+                offset = Math.max(offset, rxLen - 3);
                 break;
             }
         }
     }
+
+    if (offset > 0) {
+        if (offset < rxLen) {
+            rxBuffer.copyWithin(0, offset, rxLen);
+            rxLen -= offset;
+        } else {
+            rxLen = 0;
+        }
+    }
+}
+
+function parsePacketAt(offset) {
+    const cameraFlag = rxBuffer[offset + 2] & 0x01;
+    updateCameraIndicator(cameraFlag === 1);
+
+    amplitudeExcitation = ((rxBuffer[offset + 3] << 7) | (rxBuffer[offset + 2] >> 1)) & 0x7FFF;
+    if (amplitudeExcitation !== lastAmplitudeExcitation) {
+        lastAmplitudeExcitation = amplitudeExcitation;
+        if (statAmpExc) statAmpExc.textContent = amplitudeExcitation;
+    }
+
+    const dv = new DataView(rxBuffer.buffer, rxBuffer.byteOffset + offset, PACKET_SIZE);
+
+    // Leer configuración (uint16_t, little-endian)
+    const samplesPerPeriod = dv.getUint16(HEADER_SIZE, true);
+    const clockPrescaler = dv.getUint16(HEADER_SIZE + 2, true);
+    // Leer número de secuencia (uint32_t, little-endian)
+    const packetSeq = dv.getUint32(HEADER_SIZE + CONFIG_SIZE, true);
+
+    // Detección de paquetes perdidos mediante seq
+    let lostInThisGap = 0;
+    if (lastPacketSeq !== null) {
+        const diff = (packetSeq - lastPacketSeq) >>> 0;
+        if (diff > 1 && diff <= 10000) {
+            lostInThisGap = diff - 1;
+            lostPackets += lostInThisGap;
+            if (statLostPkts) statLostPkts.textContent = lostPackets;
+        }
+    }
+    lastPacketSeq = packetSeq;
+
+    // Vista directa de Int16Array para ch0 y ch1 (zero-copy)
+    const ch0Offset = rxBuffer.byteOffset + offset + HEADER_SIZE + CONFIG_SIZE + SEQ_SIZE;
+    const ch1Offset = ch0Offset + CH_BUFFER_SIZE;
+    const ch0 = new Int16Array(rxBuffer.buffer, ch0Offset, MAX_BUFFER_LEN);
+    const ch1 = new Int16Array(rxBuffer.buffer, ch1Offset, MAX_BUFFER_LEN);
+    const ch = [ch0, ch1];
+
+    processPacket(ch, samplesPerPeriod, clockPrescaler, lostInThisGap);
+    packetTimestamps.push({ t: performance.now(), n: SAMPLES_PCH });
 }
 
 function processPacket(ch, samplesPerPeriod, clockPrescaler, lostInThisGap = 0) {
     const outSamples = SAMPLES_PCH; // 256 muestras directas de amplitud
 
-    let outCh = [[], []];
-    if (currentAveraging <= 1) {
-        outCh = ch;
-    } else {
+    let outCh = ch;
+    if (currentAveraging > 1) {
+        outCh = [new Float32Array(outSamples), new Float32Array(outSamples)];
         for (let c = 0; c < NUM_CH; c++) {
+            const hist = maHistory[c];
+            const avgLen = currentAveraging;
             for (let s = 0; s < outSamples; s++) {
-                maHistory[c].push(ch[c][s]);
-                if (maHistory[c].length > currentAveraging) {
-                    maHistory[c].shift();
+                const val = ch[c][s];
+                hist.push(val);
+                maSum[c] += val;
+                if (hist.length > avgLen) {
+                    maSum[c] -= hist.shift();
                 }
-                let sum = 0;
-                for (let i = 0; i < maHistory[c].length; i++) sum += maHistory[c][i];
-                outCh[c].push(sum / maHistory[c].length);
+                outCh[c][s] = maSum[c] / hist.length;
             }
         }
     }
 
-    // Ingresar las muestras de cada canal al historial circular
+    // Ingresar las muestras de cada canal al historial circular (Float32Array)
     for (let s = 0; s < outSamples; s++) {
-        for (let c = 0; c < NUM_CH; c++) histories[c][writeIdx] = outCh[c][s];
+        for (let c = 0; c < NUM_CH; c++) {
+            histories[c][writeIdx] = outCh[c][s];
+        }
         writeIdx = (writeIdx + 1) % histLen;
     }
 
@@ -467,19 +492,16 @@ function processPacket(ch, samplesPerPeriod, clockPrescaler, lostInThisGap = 0) 
         valBadges[c].textContent = outSamples > 0 ? Math.round(outCh[c][outSamples - 1]) : "—";
     }
 
-    // Actualizar configuración en pantalla
+    // Actualizar configuración en pantalla (solo si cambió)
     updateConfigDisplay(samplesPerPeriod, clockPrescaler);
 
     // Grabar si está activo
     if (isRecording) {
-        const SAMPLES_PER_FRAME = SAMPLES_PCH; // 256 muestras de amplitud
+        const SAMPLES_PER_FRAME = SAMPLES_PCH;
 
         // Si se perdieron paquetes previos, replicar la última muestra (256 por paquete perdido)
         if (lostInThisGap > 0) {
-            let fillCh0 = 0;
-            let fillCh1 = 0;
-            let fillCam = isCameraRecording ? 1 : 0;
-
+            let fillCh0 = 0, fillCh1 = 0, fillCam = isCameraRecording ? 1 : 0;
             if (recordedBuffer.length > 0) {
                 const lastRow = recordedBuffer[recordedBuffer.length - 1];
                 fillCh0 = lastRow[0];
@@ -524,6 +546,9 @@ function processPacket(ch, samplesPerPeriod, clockPrescaler, lostInThisGap = 0) 
 }
 
 function updateConfigDisplay(samplesPerPeriod, clockPrescaler) {
+    if (samplesPerPeriod === currentSamplesPerPeriod && clockPrescaler === currentClockPrescaler) {
+        return;
+    }
     currentSamplesPerPeriod = samplesPerPeriod;
     currentClockPrescaler = clockPrescaler;
 
@@ -637,28 +662,47 @@ function updateRateStats() {
 
     if (!keepReading || !packetTimestamps.length) {
         ratePkts.textContent = rateSamp.textContent = '—';
+        if (timeWindowHint) timeWindowHint.textContent = 'Ventana temporal: —';
         return;
     }
     const win = Math.max((now - packetTimestamps[0].t) / 1000, 0.1);
     const totalN = packetTimestamps.reduce((s, p) => s + p.n, 0);
+    const sampPerSec = totalN / win;
     ratePkts.textContent = (packetTimestamps.length / win).toFixed(1);
-    rateSamp.textContent = (totalN / win).toFixed(0);
+    rateSamp.textContent = sampPerSec.toFixed(0);
+    if (statSeq && lastPacketSeq !== null) statSeq.textContent = lastPacketSeq;
+
+    if (timeWindowHint) {
+        if (sampPerSec > 0) {
+            const secs = histLen / sampPerSec;
+            timeWindowHint.textContent = secs >= 1
+                ? `Ventana temporal: ~${secs.toFixed(2)} s`
+                : `Ventana temporal: ~${Math.round(secs * 1000)} ms`;
+        } else {
+            timeWindowHint.textContent = 'Ventana temporal: —';
+        }
+    }
 }
 
-// ── Render de gráficos con decimación ────────────────────────────────────────
+// ── Render de gráficos con decimación Min-Max en tiempo real ─────────────────
+const MAX_DRAW_POINTS = 8192;
+const drawX = new Float32Array(MAX_DRAW_POINTS);
+const drawY = new Float32Array(MAX_DRAW_POINTS);
+
 function drawLoop() {
     drawCharts();
     requestAnimationFrame(drawLoop);
 }
 
 function drawCharts() {
-    const step = Math.max(1, Math.round(decimFactor));
+    const userStep = Math.max(1, Math.round(decimFactor));
 
     for (let c = 0; c < NUM_CH; c++) {
         const canvas = canvases[c];
         const ctx = ctxs[c];
-        const W = canvas.width / (devicePixelRatio || 1);
-        const H = canvas.height / (devicePixelRatio || 1);
+        const dpr = window.devicePixelRatio || 1;
+        const W = canvas.width / dpr;
+        const H = canvas.height / dpr;
 
         // Fondo
         ctx.fillStyle = '#0d0d0f';
@@ -667,34 +711,104 @@ function drawCharts() {
         // Grid
         ctx.strokeStyle = 'rgba(255,255,255,0.04)';
         ctx.lineWidth = 1;
-        for (let i = 1; i < 10; i++) { const x = W / 10 * i; ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
-        for (let i = 1; i < 5; i++) { const y = H / 5 * i; ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+        for (let i = 1; i < 10; i++) {
+            const x = (W / 10) * i;
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, H);
+            ctx.stroke();
+        }
+        for (let i = 1; i < 5; i++) {
+            const y = (H / 5) * i;
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            ctx.lineTo(W, y);
+            ctx.stroke();
+        }
 
-        // Datos en orden cronológico (buffer circular completo)
         const rawLen = histLen;
-        const drawLen = Math.ceil(rawLen / step);
+        const hChannel = histories[c];
 
-        // Calcular min/max sobre datos crudos para la escala
+        // Límite de columnas horizontales adaptado a la resolución de pantalla
+        const maxColumns = Math.max(64, Math.floor(W));
+        const targetPoints = Math.min(maxColumns, Math.ceil(rawLen / userStep));
+
+        let globalMin = Infinity;
+        let globalMax = -Infinity;
+        let pointCount = 0;
+
+        if (targetPoints >= rawLen) {
+            // Muestreo 1:1 directo (para buffers pequeños)
+            for (let i = 0; i < rawLen; i++) {
+                let rIdx = writeIdx + i;
+                if (rIdx >= rawLen) rIdx -= rawLen;
+                const v = hChannel[rIdx];
+                if (v < globalMin) globalMin = v;
+                if (v > globalMax) globalMax = v;
+                drawX[i] = (W / (rawLen - 1 || 1)) * i;
+                drawY[i] = v;
+            }
+            pointCount = rawLen;
+        } else {
+            // Min-Max (Envelope) Downsampling en una sola pasada:
+            // Garantiza capturar el 100% de los picos/valles de burbujas sin retrasar el loop de lectura USB
+            const numBuckets = Math.min(targetPoints, Math.floor(MAX_DRAW_POINTS / 2));
+            const bucketSize = rawLen / numBuckets;
+
+            let ptIdx = 0;
+            for (let b = 0; b < numBuckets; b++) {
+                const iStart = Math.floor(b * bucketSize);
+                const iEnd = Math.min(rawLen, Math.floor((b + 1) * bucketSize));
+
+                let bMin = Infinity, bMax = -Infinity;
+                let bMinIdx = iStart, bMaxIdx = iStart;
+
+                for (let i = iStart; i < iEnd; i++) {
+                    let rIdx = writeIdx + i;
+                    if (rIdx >= rawLen) rIdx -= rawLen;
+                    const v = hChannel[rIdx];
+                    if (v < bMin) { bMin = v; bMinIdx = i; }
+                    if (v > bMax) { bMax = v; bMaxIdx = i; }
+                }
+
+                if (bMin < globalMin) globalMin = bMin;
+                if (bMax > globalMax) globalMax = bMax;
+
+                const x = (W / (numBuckets - 1 || 1)) * b;
+
+                // Mantener el orden cronológico dentro del intervalo para preservar la forma de onda
+                if (bMinIdx <= bMaxIdx) {
+                    drawX[ptIdx] = x; drawY[ptIdx++] = bMin;
+                    if (bMin !== bMax && ptIdx < MAX_DRAW_POINTS) {
+                        drawX[ptIdx] = x; drawY[ptIdx++] = bMax;
+                    }
+                } else {
+                    drawX[ptIdx] = x; drawY[ptIdx++] = bMax;
+                    if (bMin !== bMax && ptIdx < MAX_DRAW_POINTS) {
+                        drawX[ptIdx] = x; drawY[ptIdx++] = bMin;
+                    }
+                }
+            }
+            pointCount = ptIdx;
+        }
+
+        // Amplitud pico-pico
+        ppBadges[c].textContent = (globalMax === -Infinity) ? '—' : Math.round(globalMax - globalMin);
+
+        // Escala vertical
         let lo, hi;
         if (isAutoscale) {
-            lo = Infinity; hi = -Infinity;
-            for (let i = 0; i < rawLen; i++) {
-                const v = histories[c][(writeIdx + i) % rawLen];
-                if (v < lo) lo = v;
-                if (v > hi) hi = v;
+            if (globalMin === Infinity) { globalMin = 0; globalMax = 1; }
+            if (globalMin === globalMax) { lo = globalMin - 1; hi = globalMax + 1; }
+            else {
+                const margin = (globalMax - globalMin) * 0.07;
+                lo = globalMin - margin;
+                hi = globalMax + margin;
             }
-            if (lo === hi) { lo -= 1; hi += 1; }
-            else { const m = (hi - lo) * 0.07; lo -= m; hi += m; }
-        } else { lo = yMin; hi = yMax || yMin + 1; }
-
-        // Amplitud pico-pico (sobre datos crudos)
-        let rawMin = Infinity, rawMax = -Infinity;
-        for (let i = 0; i < rawLen; i++) {
-            const v = histories[c][(writeIdx + i) % rawLen];
-            if (v < rawMin) rawMin = v;
-            if (v > rawMax) rawMax = v;
+        } else {
+            lo = yMin;
+            hi = yMax || yMin + 1;
         }
-        ppBadges[c].textContent = rawMax === -Infinity ? '—' : (rawMax - rawMin);
 
         // Etiquetas de escala
         ctx.fillStyle = 'rgba(255,255,255,0.3)';
@@ -703,30 +817,38 @@ function drawCharts() {
         ctx.fillText(Math.round(hi), 5, 12);
         ctx.fillText(Math.round(lo), 5, H - 4);
 
-        // Trazar señal con decimación
-        const getX = i => (W / (drawLen - 1 || 1)) * i;
-        const getY = v => H - ((v - lo) / (hi - lo)) * H;
+        if (pointCount < 2) continue;
 
+        // Convertir drawY de amplitudes a coordenadas en píxeles
+        const scaleY = H / (hi - lo || 1);
+        for (let i = 0; i < pointCount; i++) {
+            drawY[i] = H - (drawY[i] - lo) * scaleY;
+        }
+
+        // Trazado de señal
         ctx.beginPath();
-        let started = false;
-        for (let di = 0; di < drawLen; di++) {
-            const rawIdx = (writeIdx + di * step) % rawLen;
-            const v = histories[c][rawIdx];
-            const x = getX(di), y = getY(v);
-            if (!started) { ctx.moveTo(x, y); started = true; }
-            else ctx.lineTo(x, y);
+        ctx.moveTo(drawX[0], drawY[0]);
+        for (let i = 1; i < pointCount; i++) {
+            ctx.lineTo(drawX[i], drawY[i]);
         }
 
         ctx.strokeStyle = CH_COLORS[c];
         ctx.lineWidth = 1.5;
-        ctx.shadowBlur = 4;
-        ctx.shadowColor = CH_COLORS[c];
+
+        // Glow ligero solo con buffers pequeños para no impactar rendimiento
+        if (pointCount <= 500) {
+            ctx.shadowBlur = 4;
+            ctx.shadowColor = CH_COLORS[c];
+        } else {
+            ctx.shadowBlur = 0;
+        }
+
         ctx.stroke();
         ctx.shadowBlur = 0;
 
         // Relleno degradado
-        ctx.lineTo(getX(drawLen - 1), H);
-        ctx.lineTo(0, H);
+        ctx.lineTo(drawX[pointCount - 1], H);
+        ctx.lineTo(drawX[0], H);
         ctx.closePath();
         ctx.fillStyle = CH_GRADIENTS[c];
         ctx.fill();
@@ -760,6 +882,7 @@ function setConnected(on) {
         console.warn('Grabación cancelada por desconexión.');
     }
     if (!on) {
+        rxLen = 0;
         packetTimestamps = [];
         updateRateStats();
         resetConfigDisplay();
@@ -779,15 +902,18 @@ function resetLostPackets() {
 
 // ── Redimensionar historial ───────────────────────────────────────────────────
 function resizeHistory(newLen) {
-    const newH = [new Array(newLen).fill(0), new Array(newLen).fill(0)];
+    const newH = [new Float32Array(newLen), new Float32Array(newLen)];
+    const count = Math.min(histLen, newLen);
     for (let c = 0; c < NUM_CH; c++) {
-        const ordered = [];
-        for (let i = 0; i < histLen; i++) ordered.push(histories[c][(writeIdx + i) % histLen]);
-        const start = Math.max(0, ordered.length - newLen);
-        for (let i = start; i < ordered.length; i++) newH[c][i - start] = ordered[i];
+        for (let i = 0; i < count; i++) {
+            let oldIdx = writeIdx - count + i;
+            if (oldIdx < 0) oldIdx += histLen;
+            newH[c][i] = histories[c][oldIdx];
+        }
     }
     histories = newH;
     histLen = newLen;
-    writeIdx = 0;
+    writeIdx = count % newLen;
+    updateRateStats();
     console.log(`Historial ajustado a ${newLen} muestras.`);
 }

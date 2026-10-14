@@ -335,6 +335,7 @@ html, body { height: 100%; font-family: var(--font); background: var(--bg); colo
 .range-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .field { display: flex; flex-direction: column; gap: 3px; }
 .field label { font-size: 11px; color: var(--muted); }
+.help-text { font-size: 11px; color: var(--muted); margin-top: 5px; line-height: 1.3; }
 
 /* ============================================================
    LOG
