@@ -309,6 +309,18 @@ async function openSerialPort(port) {
 }
 
 async function connectSerial() {
+
+    // WebUSB sí abrirá la ventana de permisos de Android para dispositivos OTG
+    try {
+        const device = await navigator.usb.requestDevice({ filters: [] });
+        await device.open();
+        await device.selectConfiguration(1);
+        await device.claimInterface(0);
+        console.log("Conectado vía WebUSB:", device.productName);
+    } catch (error) {
+        console.error("Error al conectar:", error);
+    }
+
     try {
         // 1. Si ya se concedió permiso previamente, verificar si "Medidor de Burbujas" está disponible
         if ('serial' in navigator) {
