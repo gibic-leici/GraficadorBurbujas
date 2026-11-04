@@ -30,6 +30,7 @@ const CH_GRADIENTS = ['rgba(79,156,249,0.07)', 'rgba(249,127,79,0.07)'];
 // ── Utilidades ───────────────────────────────────────────────────────────────
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const WEB_SERIAL_POLYFILL_URL = 'https://cdn.jsdelivr.net/npm/web-serial-polyfill@1.0.15/+esm';
+const USB_READ_BUFFER_SIZE = 16384;
 
 // ── Estado ───────────────────────────────────────────────────────────────────
 let serialPort = null, reader = null, serialWriter = null, keepReading = false;
@@ -295,10 +296,10 @@ function isMedidorDeBurbujas(port) {
     return false;
 }
 
-async function openSerialPort(port, { transport = 'serie', bufferSize = true } = {}) {
+async function openSerialPort(port, { transport = 'serie', bufferSize = USB_READ_BUFFER_SIZE } = {}) {
     if (bufferSize) {
         try {
-            await port.open({ baudRate: BAUD_RATE, bufferSize: 16384 });
+            await port.open({ baudRate: BAUD_RATE, bufferSize });
         } catch {
             await port.open({ baudRate: BAUD_RATE });
         }
@@ -465,7 +466,7 @@ async function connectUsb() {
         const port = await api.requestPort({
             filters: [{ usbVendorId: TARGET_USB_VID }]
         });
-        await openSerialPort(port, { transport: 'WebUSB (polyfill)', bufferSize: false });
+        await openSerialPort(port, { transport: 'WebUSB (polyfill)', bufferSize: USB_READ_BUFFER_SIZE });
     } catch (error) {
         if (error.name === 'NotFoundError') {
             console.log('Selección de dispositivo USB cancelada por el usuario.');
