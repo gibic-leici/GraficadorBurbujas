@@ -445,20 +445,42 @@ async function disconnectSerial() {
 
 async function readLoop(activeReader) {
     let readError = null;
+    let stage = 'lectura';
+    let receivedBytes = 0;
     try {
         while (keepReading) {
+            stage = 'lectura';
             const { value, done } = await activeReader.read();
-            if (done) break;
-            if (value) handleBytes(value);
+            if (done) {
+                readError = `${activeTransport}: el flujo terminó (done=true).`;
+                break;
+            }
+            if (value?.byteLength) {
+                receivedBytes += value.byteLength;
+                stage = 'parser';
+                handleBytes(value);
+            }
         }
     } catch (error) {
         if (keepReading) {
-            readError = `${activeTransport}: ${error.message}`;
-            console.error('Error de lectura:', error.message);
+            readError = `${activeTransport}, etapa ${stage}: ${describeTransportError(error)} ` +
+                `(bytes recibidos: ${receivedBytes}).`;
+            console.error('Error en el flujo serie:', {
+                stage,
+                error,
+                errorType: typeof error,
+                errorName: error?.name,
+                errorMessage: error?.message,
+                errorStack: error?.stack,
+                receivedBytes
+            });
         }
     } finally {
         if (keepReading) {
-            if (!readError) readError = `${activeTransport}: el dispositivo cerró el flujo de lectura.`;
+            if (!readError) {
+                readError = `${activeTransport}: el flujo se detuvo inesperadamente ` +
+                    `(bytes recibidos: ${receivedBytes}).`;
+            }
             await disconnectSerial();
             showConnectionError(readError);
         } else {
@@ -466,6 +488,17 @@ async function readLoop(activeReader) {
             if (reader === activeReader) reader = null;
         }
     }
+}
+
+function describeTransportError(error) {
+    if (error === undefined) return 'rechazo sin valor (undefined)';
+    if (error === null) return 'rechazo sin valor (null)';
+    if (typeof error === 'object') {
+        const name = error.name || 'Error';
+        const message = error.message || '';
+        return message ? `${name}: ${message}` : `${name} sin mensaje`;
+    }
+    return `${typeof error}: ${String(error)}`;
 }
 
 function showConnectionError(message) {
