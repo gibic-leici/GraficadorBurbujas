@@ -414,25 +414,36 @@ function patchEmptyUsbChunkBug(SerialPort) {
                             : endpoint.packetSize;
 
                         try {
-                            const result = await port.device_.transferIn(endpoint.endpointNumber, length);
-                            if (result.status !== 'ok') {
-                                throw new Error(`USB error: ${result.status}`);
-                            }
-                            if (result.data?.byteLength > 0) {
-                                controller.enqueue(new Uint8Array(
-                                    result.data.buffer,
-                                    result.data.byteOffset,
-                                    result.data.byteLength
-                                ));
+                            while (!port.readableCancelled_ && port.device_.opened) {
+                                const result = await port.device_.transferIn(endpoint.endpointNumber, length);
+                                if (port.readableCancelled_) return;
+                                if (result.status !== 'ok') {
+                                    throw new Error(`USB error: ${result.status}`);
+                                }
+                                if (result.data?.byteLength > 0) {
+                                    controller.enqueue(new Uint8Array(
+                                        result.data.buffer,
+                                        result.data.byteOffset,
+                                        result.data.byteLength
+                                    ));
+                                    return;
+                                }
+                                await delay(5);
                             }
                         } catch (error) {
-                            port.readable_ = null;
-                            controller.error(error);
+                            if (!port.readableCancelled_) {
+                                port.readable_ = null;
+                                controller.error(error);
+                            }
                         }
+                    },
+                    cancel() {
+                        port.readableCancelled_ = true;
                     }
                 }, {
                     highWaterMark: this.serialOptions_?.bufferSize ?? 255
                 });
+                this.readableCancelled_ = false;
             }
             return this.readable_;
         }
