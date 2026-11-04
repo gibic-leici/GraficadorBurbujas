@@ -14,4 +14,4 @@ Graficador y monitor de señales ADC por puerto COM (CDC USB / Web Serial API) p
 Abrir `index.html` desde un contexto seguro (por ejemplo, HTTPS) en Chrome, Edge u Opera.
 
 - En PC, usar **Conectar por serie** (Web Serial API).
-- En Android, conectar el dispositivo mediante un adaptador OTG y usar **Conectar por USB** (WebUSB). El navegador debe permitir WebUSB y el dispositivo debe identificarse como STM32 `VID 0x0483 / PID 0x5740`.
+- En Android, conectar el dispositivo mediante un adaptador OTG y usar **Conectar por USB**. Esta opción usa `web-serial-polyfill` sobre WebUSB, igual que `terminal-serie-usb.html`; requiere que el navegador permita WebUSB y acceso a jsDelivr para cargar el polyfill.
