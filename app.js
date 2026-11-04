@@ -108,16 +108,12 @@ window.addEventListener('DOMContentLoaded', () => {
     setInterval(updateRateStats, 300);
 
     const serialSupported = 'serial' in navigator;
-    const usbSupported = 'usb' in navigator;
     btnConnect.disabled = !serialSupported;
     btnConnect.classList.toggle('hidden', !serialSupported);
-    btnUsbConnect.classList.toggle('hidden', !usbSupported);
+    btnUsbConnect.classList.remove('hidden');
 
     if (!serialSupported) {
         console.error('Web Serial API no disponible. Usar Chrome, Edge u Opera.');
-    }
-    if (!serialSupported && !usbSupported) {
-        console.error('Este navegador no dispone de Web Serial ni WebUSB.');
     }
 });
 
@@ -467,6 +463,15 @@ async function openUsbDevice(device) {
 }
 
 async function connectUsb() {
+    if (!window.isSecureContext) {
+        showConnectionError('WebUSB requiere abrir la aplicación desde una dirección HTTPS.');
+        return;
+    }
+    if (!('usb' in navigator)) {
+        showConnectionError('Este navegador no ofrece WebUSB. Prueba con Chrome actualizado y una dirección HTTPS.');
+        return;
+    }
+
     try {
         const device = await navigator.usb.requestDevice({
             filters: [{ vendorId: TARGET_USB_VID, productId: TARGET_USB_PID }]
@@ -490,10 +495,7 @@ async function connectUsb() {
         usbInEndpoint = usbOutEndpoint = null;
         usbDataInterface = usbControlInterface = null;
         setConnected(false);
-<<<<<<< HEAD
         showConnectionError(`USB: ${error.message}`);
-=======
->>>>>>> f150f4f6edd63ec7f6a295260280b0c8bac3486e
     }
 }
 
@@ -520,10 +522,7 @@ async function disconnectSerial() {
 }
 
 async function readLoop() {
-<<<<<<< HEAD
     let readError = null;
-=======
->>>>>>> f150f4f6edd63ec7f6a295260280b0c8bac3486e
     if (usbDevice && usbInEndpoint !== null) {
         try {
             while (keepReading && usbDevice) {
@@ -532,7 +531,6 @@ async function readLoop() {
                 if (result.data?.byteLength) {
                     handleBytes(new Uint8Array(result.data.buffer, result.data.byteOffset, result.data.byteLength));
                 }
-<<<<<<< HEAD
             }
         } catch (error) {
             if (keepReading) {
@@ -587,50 +585,6 @@ async function readLoop() {
 function showConnectionError(message) {
     connectionError.textContent = message;
     connectionError.classList.remove('hidden');
-=======
-            }
-        } catch (error) {
-            if (keepReading) console.error('Error de lectura USB:', error.message);
-        }
-    } else {
-        while (serialPort?.readable && keepReading) {
-            try {
-                reader = serialPort.readable.getReader();
-                while (keepReading) {
-                    const { value, done } = await reader.read();
-                    if (done) break;
-                    if (value) handleBytes(value);
-                }
-            } catch (error) {
-                if (keepReading) console.error('Error de lectura:', error.message);
-                break;
-            } finally {
-                reader?.releaseLock();
-                reader = null;
-            }
-        }
-    }
-    if (keepReading) {
-        console.warn('Conexión perdida.');
-        keepReading = false;
-        if (usbDevice) {
-            try { await usbDevice.close(); } catch (error) {
-                console.error('Error al cerrar el dispositivo USB:', error.message);
-            }
-            usbDevice = null;
-            usbInEndpoint = usbOutEndpoint = null;
-            usbDataInterface = usbControlInterface = null;
-        }
-        if (serialPort) {
-            const port = serialPort;
-            serialPort = null;
-            try { await port.close(); } catch (error) {
-                console.error('Error al cerrar el puerto serie:', error.message);
-            }
-        }
-        setConnected(false);
-    }
->>>>>>> f150f4f6edd63ec7f6a295260280b0c8bac3486e
 }
 
 // ── Parser de paquetes ────────────────────────────────────────────────────────
@@ -1128,15 +1082,12 @@ function updateCameraIndicator(isOn) {
 function setConnected(on) {
     statusDot.className = 'dot ' + (on ? 'dot-on' : 'dot-off');
     statusText.textContent = on ? 'Conectado' : 'Desconectado';
-<<<<<<< HEAD
     if (on) {
         connectionError.textContent = '';
         connectionError.classList.add('hidden');
     }
-=======
->>>>>>> f150f4f6edd63ec7f6a295260280b0c8bac3486e
     btnConnect.classList.toggle('hidden', on || !('serial' in navigator));
-    btnUsbConnect.classList.toggle('hidden', on || !('usb' in navigator));
+    btnUsbConnect.classList.toggle('hidden', on);
     btnDisconnect.classList.toggle('hidden', !on);
     btnRecStart.disabled = !on;
     btnRecTimed.disabled = !on;
