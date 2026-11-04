@@ -639,11 +639,23 @@ function parsePacketAt(offset) {
     }
     lastPacketSeq = packetSeq;
 
-    // Vista directa de Int16Array para ch0 y ch1 (zero-copy)
+    // Use zero-copy views when aligned; sync recovery can find a header at an odd byte offset.
     const ch0Offset = rxBuffer.byteOffset + offset + HEADER_SIZE + CONFIG_SIZE + SEQ_SIZE;
     const ch1Offset = ch0Offset + CH_BUFFER_SIZE;
-    const ch0 = new Int16Array(rxBuffer.buffer, ch0Offset, MAX_BUFFER_LEN);
-    const ch1 = new Int16Array(rxBuffer.buffer, ch1Offset, MAX_BUFFER_LEN);
+    let ch0, ch1;
+    if (ch0Offset % SAMPLE_SIZE === 0 && ch1Offset % SAMPLE_SIZE === 0) {
+        ch0 = new Int16Array(rxBuffer.buffer, ch0Offset, MAX_BUFFER_LEN);
+        ch1 = new Int16Array(rxBuffer.buffer, ch1Offset, MAX_BUFFER_LEN);
+    } else {
+        ch0 = new Int16Array(MAX_BUFFER_LEN);
+        ch1 = new Int16Array(MAX_BUFFER_LEN);
+        const ch0DataOffset = HEADER_SIZE + CONFIG_SIZE + SEQ_SIZE;
+        const ch1DataOffset = ch0DataOffset + CH_BUFFER_SIZE;
+        for (let i = 0; i < MAX_BUFFER_LEN; i++) {
+            ch0[i] = dv.getInt16(ch0DataOffset + i * SAMPLE_SIZE, true);
+            ch1[i] = dv.getInt16(ch1DataOffset + i * SAMPLE_SIZE, true);
+        }
+    }
     const ch = [ch0, ch1];
 
     processPacket(ch, samplesPerPeriod, clockPrescaler, lostInThisGap);
