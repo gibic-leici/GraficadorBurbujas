@@ -29,7 +29,7 @@ const CH_GRADIENTS = ['rgba(79,156,249,0.07)', 'rgba(249,127,79,0.07)'];
 
 // ── Utilidades ───────────────────────────────────────────────────────────────
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-const WEB_SERIAL_POLYFILL_URL = 'https://cdn.jsdelivr.net/npm/web-serial-polyfill/+esm';
+const WEB_SERIAL_POLYFILL_URL = 'https://cdn.jsdelivr.net/npm/web-serial-polyfill@1.0.15/+esm';
 
 // ── Estado ───────────────────────────────────────────────────────────────────
 let serialPort = null, reader = null, serialWriter = null, keepReading = false;
@@ -381,6 +381,7 @@ function loadUsbSerialApi() {
                 if (!module.serial?.requestPort) {
                     throw new Error('El polyfill no expone una API serie compatible.');
                 }
+                patchEmptyUsbChunkBug(module.SerialPort);
                 usbSerialApi = module.serial;
                 return usbSerialApi;
             })
@@ -390,6 +391,52 @@ function loadUsbSerialApi() {
             });
     }
     return usbSerialApiPromise;
+}
+
+function patchEmptyUsbChunkBug(SerialPort) {
+    const descriptor = Object.getOwnPropertyDescriptor(SerialPort.prototype, 'readable');
+    if (!descriptor?.get || descriptor.configurable === false) {
+        throw new Error('No se puede corregir el flujo USB del polyfill en esta versión.');
+    }
+
+    Object.defineProperty(SerialPort.prototype, 'readable', {
+        configurable: true,
+        get() {
+            if (!this.readable_ && this.device_.opened) {
+                const port = this;
+                this.readable_ = new ReadableStream({
+                    type: 'bytes',
+                    async pull(controller) {
+                        const endpoint = port.inEndpoint_;
+                        const desiredSize = controller.desiredSize;
+                        const length = desiredSize
+                            ? Math.ceil(desiredSize / endpoint.packetSize) * endpoint.packetSize
+                            : endpoint.packetSize;
+
+                        try {
+                            const result = await port.device_.transferIn(endpoint.endpointNumber, length);
+                            if (result.status !== 'ok') {
+                                throw new Error(`USB error: ${result.status}`);
+                            }
+                            if (result.data?.byteLength > 0) {
+                                controller.enqueue(new Uint8Array(
+                                    result.data.buffer,
+                                    result.data.byteOffset,
+                                    result.data.byteLength
+                                ));
+                            }
+                        } catch (error) {
+                            port.readable_ = null;
+                            controller.error(error);
+                        }
+                    }
+                }, {
+                    highWaterMark: this.serialOptions_?.bufferSize ?? 255
+                });
+            }
+            return this.readable_;
+        }
+    });
 }
 
 async function connectUsb() {
