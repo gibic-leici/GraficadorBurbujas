@@ -1,5 +1,5 @@
 /**
- * Graficador ADC — 2 canales int16_t via CDC USB (puerto COM)
+ * Graficador ADC — 2 canales int16_t por Web Serial o WebUSB CDC
  *
  * Protocolo:
  *   Transmisión firmware:
@@ -31,7 +31,9 @@ const CH_GRADIENTS = ['rgba(79,156,249,0.07)', 'rgba(249,127,79,0.07)'];
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // ── Estado ───────────────────────────────────────────────────────────────────
-let serialPort = null, reader = null, keepReading = false;
+let serialPort = null, usbDevice = null, reader = null, keepReading = false;
+let usbInEndpoint = null, usbOutEndpoint = null;
+let usbDataInterface = null, usbControlInterface = null;
 let rxBuffer = new Uint8Array(65536);
 let rxLen = 0;
 let syncErrors = 0;
@@ -61,6 +63,7 @@ let lastAmplitudeExcitation = -1;
 // ── DOM ──────────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
 const btnConnect = $('btn-connect');
+const btnUsbConnect = $('btn-usb-connect');
 const btnDisconnect = $('btn-disconnect');
 const btnRecStart = $('btn-record-start');
 const btnRecStop = $('btn-record-stop');
@@ -68,6 +71,7 @@ const btnRecTimed = $('btn-record-timed');
 const inputRecDur = $('input-rec-duration');
 const statusDot = $('status-dot');
 const statusText = $('status-text');
+const connectionError = $('connection-error');
 const recDot = $('recording-dot');
 const recText = $('recording-text');
 const ratePkts = $('rate-pkts');
@@ -103,9 +107,17 @@ window.addEventListener('DOMContentLoaded', () => {
     requestAnimationFrame(drawLoop);
     setInterval(updateRateStats, 300);
 
-    if (!('serial' in navigator)) {
+    const serialSupported = 'serial' in navigator;
+    const usbSupported = 'usb' in navigator;
+    btnConnect.disabled = !serialSupported;
+    btnConnect.classList.toggle('hidden', !serialSupported);
+    btnUsbConnect.classList.toggle('hidden', !usbSupported);
+
+    if (!serialSupported) {
         console.error('Web Serial API no disponible. Usar Chrome, Edge u Opera.');
-        btnConnect.disabled = true;
+    }
+    if (!serialSupported && !usbSupported) {
+        console.error('Este navegador no dispone de Web Serial ni WebUSB.');
     }
 });
 
@@ -123,6 +135,7 @@ function initCanvases() {
 
 function setupEvents() {
     btnConnect.addEventListener('click', connectSerial);
+    btnUsbConnect.addEventListener('click', connectUsb);
     btnDisconnect.addEventListener('click', disconnectSerial);
     btnRecStart.addEventListener('click', () => startRecording());
     btnRecStop.addEventListener('click', stopRecording);
@@ -169,25 +182,36 @@ function setupEvents() {
 }
 
 // ── Conexión serie ────────────────────────────────────────────────────────────
-async function sendSerialCommand(cmd) {
-    if (!serialPort || !serialPort.writable) {
-        console.warn('No se puede enviar comando: puerto serie no disponible para escritura.');
+async function sendDeviceCommand(cmd) {
+    if (serialPort?.writable) {
+        const writer = serialPort.writable.getWriter();
+        try {
+            await writer.write(new TextEncoder().encode(cmd));
+            console.log(`Comando serie enviado: ${JSON.stringify(cmd)}`);
+        } catch (err) {
+            console.error('Error al enviar comando serie:', err.message);
+        } finally {
+            writer.releaseLock();
+        }
         return;
     }
-    const encoder = new TextEncoder();
-    const writer = serialPort.writable.getWriter();
-    try {
-        await writer.write(encoder.encode(cmd));
-        console.log(`Comando serie enviado: ${JSON.stringify(cmd)}`);
-    } catch (err) {
-        console.error('Error al enviar comando serie:', err.message);
-    } finally {
-        writer.releaseLock();
+
+    if (usbDevice && usbOutEndpoint !== null) {
+        try {
+            const result = await usbDevice.transferOut(usbOutEndpoint, new TextEncoder().encode(cmd));
+            if (result.status !== 'ok') throw new Error(`USB transferOut status: ${result.status}`);
+            console.log(`Comando USB enviado: ${JSON.stringify(cmd)}`);
+        } catch (err) {
+            console.error('Error al enviar comando USB:', err.message);
+        }
+        return;
     }
+
+    console.warn('No se puede enviar comando: dispositivo no disponible para escritura.');
 }
 
 async function setExcitationFrequency(freqHz) {
-    if (!serialPort || !serialPort.writable || !keepReading) {
+    if ((!serialPort?.writable && !(usbDevice && usbOutEndpoint !== null)) || !keepReading) {
         console.warn('No se puede cambiar frecuencia: puerto serie no conectado.');
         return;
     }
@@ -200,10 +224,10 @@ async function setExcitationFrequency(freqHz) {
 
     try {
         console.log(`Configurando frecuencia de excitación: ${freqHz} Hz...`);
-        await sendSerialCommand(`fexc=${freqHz}\r\n`);
+        await sendDeviceCommand(`fexc=${freqHz}\r\n`);
         await new Promise(resolve => setTimeout(resolve, 2000));
-        if (keepReading && serialPort?.writable) {
-            await sendSerialCommand("start\r\n");
+        if (keepReading && (serialPort?.writable || (usbDevice && usbOutEndpoint !== null))) {
+            await sendDeviceCommand("start\r\n");
             lastPacketSeq = null;
             console.log(`Frecuencia de excitación aplicada: ${freqHz} Hz.`);
         }
@@ -216,7 +240,7 @@ async function setExcitationFrequency(freqHz) {
 }
 
 function updateCommandButtonsState() {
-    const isConnected = !!(serialPort && keepReading);
+    const isConnected = !!((serialPort || usbDevice) && keepReading);
     freqButtons.forEach(btn => {
         btn.disabled = !isConnected || isSendingCommand;
     });
@@ -290,13 +314,7 @@ async function openSerialPort(port) {
         await serialPort.open({ baudRate: BAUD_RATE });
     }
     console.log('Puerto serie conectado.');
-    rxLen = 0;
-    syncErrors = 0;
-    if (statErrors) statErrors.textContent = '0';
-    resetLostPackets();
-    setConnected(true);
-    keepReading = true;
-    readLoop();
+    startReading();
 
     // Secuencia de inicialización
     try {
@@ -308,19 +326,17 @@ async function openSerialPort(port) {
     }
 }
 
+function startReading() {
+    rxLen = 0;
+    syncErrors = 0;
+    if (statErrors) statErrors.textContent = '0';
+    resetLostPackets();
+    setConnected(true);
+    keepReading = true;
+    readLoop();
+}
+
 async function connectSerial() {
-
-    // WebUSB sí abrirá la ventana de permisos de Android para dispositivos OTG
-    try {
-        const device = await navigator.usb.requestDevice({ filters: [] });
-        await device.open();
-        await device.selectConfiguration(1);
-        await device.claimInterface(0);
-        console.log("Conectado vía WebUSB:", device.productName);
-    } catch (error) {
-        console.error("Error al conectar:", error);
-    }
-
     try {
         // 1. Si ya se concedió permiso previamente, verificar si "Medidor de Burbujas" está disponible
         if ('serial' in navigator) {
@@ -351,37 +367,219 @@ async function connectSerial() {
     }
 }
 
+function findUsbInterface(configuration, interfaceClass) {
+    for (const usbInterface of configuration.interfaces) {
+        const alternate = usbInterface.alternates.find(item => item.interfaceClass === interfaceClass);
+        if (alternate) return { usbInterface, alternate };
+    }
+    return null;
+}
+
+function hasBulkEndpoints(alternate) {
+    return alternate.endpoints.some(endpoint => endpoint.type === 'bulk' && endpoint.direction === 'in')
+        && alternate.endpoints.some(endpoint => endpoint.type === 'bulk' && endpoint.direction === 'out');
+}
+
+async function openUsbDevice(device) {
+    usbDevice = device;
+    await device.open();
+
+    if (!device.configuration) {
+        const configuration = device.configurations.find(item => item.configurationValue === 1)
+            || device.configurations[0];
+        if (!configuration) throw new Error('El dispositivo USB no tiene una configuración disponible.');
+        await device.selectConfiguration(configuration.configurationValue);
+    }
+
+    const configuration = device.configuration;
+    usbDataInterface = configuration.interfaces
+        .map(usbInterface => ({
+            usbInterface,
+            alternate: usbInterface.alternates.find(item => item.interfaceClass === 0x0A && hasBulkEndpoints(item))
+        }))
+        .find(item => item.alternate)
+        || configuration.interfaces
+            .map(usbInterface => ({
+                usbInterface,
+                alternate: usbInterface.alternates.find(hasBulkEndpoints)
+            }))
+            .find(item => item.alternate);
+    if (!usbDataInterface) {
+        throw new Error('No se encontró una interfaz USB con endpoints bulk de entrada y salida.');
+    }
+
+    usbControlInterface = findUsbInterface(configuration, 0x02);
+    const interfacesToClaim = [usbDataInterface];
+    if (usbControlInterface
+        && usbControlInterface.usbInterface.interfaceNumber !== usbDataInterface.usbInterface.interfaceNumber) {
+        interfacesToClaim.push(usbControlInterface);
+    }
+
+    for (const { usbInterface, alternate } of interfacesToClaim) {
+        await device.claimInterface(usbInterface.interfaceNumber);
+        if (alternate.alternateSetting !== 0) {
+            await device.selectAlternateInterface(usbInterface.interfaceNumber, alternate.alternateSetting);
+        }
+    }
+
+    usbInEndpoint = usbDataInterface.alternate.endpoints.find(endpoint =>
+        endpoint.type === 'bulk' && endpoint.direction === 'in'
+    ).endpointNumber;
+    usbOutEndpoint = usbDataInterface.alternate.endpoints.find(endpoint =>
+        endpoint.type === 'bulk' && endpoint.direction === 'out'
+    ).endpointNumber;
+
+    if (usbControlInterface) {
+        const interfaceNumber = usbControlInterface.usbInterface.interfaceNumber;
+        const lineCoding = new Uint8Array(7);
+        new DataView(lineCoding.buffer).setUint32(0, BAUD_RATE, true);
+        lineCoding[4] = 0;
+        lineCoding[5] = 0;
+        lineCoding[6] = 8;
+        const lineResult = await device.controlTransferOut({
+            requestType: 'class',
+            recipient: 'interface',
+            request: 0x20,
+            value: 0,
+            index: interfaceNumber
+        }, lineCoding);
+        if (lineResult.status !== 'ok') throw new Error(`USB SET_LINE_CODING status: ${lineResult.status}`);
+
+        const controlResult = await device.controlTransferOut({
+            requestType: 'class',
+            recipient: 'interface',
+            request: 0x22,
+            value: 3,
+            index: interfaceNumber
+        });
+        if (controlResult.status !== 'ok') throw new Error(`USB SET_CONTROL_LINE_STATE status: ${controlResult.status}`);
+    }
+
+    console.log('Dispositivo conectado vía WebUSB:', device.productName || device.manufacturerName || 'USB');
+    startReading();
+    try {
+        await setExcitationFrequency(20000);
+    } finally {
+        resetLostPackets();
+        syncErrors = 0;
+        if (statErrors) statErrors.textContent = '0';
+    }
+}
+
+async function connectUsb() {
+    try {
+        const device = await navigator.usb.requestDevice({
+            filters: [{ vendorId: TARGET_USB_VID, productId: TARGET_USB_PID }]
+        });
+        await openUsbDevice(device);
+    } catch (error) {
+        if (error.name === 'NotFoundError') {
+            console.log('Selección de dispositivo USB cancelada por el usuario.');
+            return;
+        }
+        console.error('Error al conectar vía WebUSB:', error.message);
+        keepReading = false;
+        if (usbDevice) {
+            try {
+                if (usbDevice.opened) await usbDevice.close();
+            } catch (closeError) {
+                console.error('Error al cerrar el dispositivo USB:', closeError.message);
+            }
+        }
+        usbDevice = null;
+        usbInEndpoint = usbOutEndpoint = null;
+        usbDataInterface = usbControlInterface = null;
+        setConnected(false);
+        showConnectionError(`USB: ${error.message}`);
+    }
+}
+
 async function disconnectSerial() {
     keepReading = false;
     if (reader) { try { await reader.cancel(); } catch { } }
-    setTimeout(async () => {
-        if (serialPort) {
-            try { await serialPort.close(); } catch { }
-            serialPort = null;
+    await delay(150);
+    if (serialPort) {
+        try { await serialPort.close(); } catch (error) {
+            console.error('Error al cerrar el puerto serie:', error.message);
         }
-        setConnected(false);
-        console.log('Puerto serie desconectado.');
-    }, 150);
+        serialPort = null;
+    }
+    if (usbDevice) {
+        try { await usbDevice.close(); } catch (error) {
+            console.error('Error al cerrar el dispositivo USB:', error.message);
+        }
+        usbDevice = null;
+    }
+    usbInEndpoint = usbOutEndpoint = null;
+    usbDataInterface = usbControlInterface = null;
+    setConnected(false);
+    console.log('Dispositivo desconectado.');
 }
 
 async function readLoop() {
-    while (serialPort?.readable && keepReading) {
+    let readError = null;
+    if (usbDevice && usbInEndpoint !== null) {
         try {
-            reader = serialPort.readable.getReader();
-            while (keepReading) {
-                const { value, done } = await reader.read();
-                if (done) break;
-                if (value) handleBytes(value);
+            while (keepReading && usbDevice) {
+                const result = await usbDevice.transferIn(usbInEndpoint, 16384);
+                if (result.status !== 'ok') throw new Error(`USB transferIn status: ${result.status}`);
+                if (result.data?.byteLength) {
+                    handleBytes(new Uint8Array(result.data.buffer, result.data.byteOffset, result.data.byteLength));
+                }
             }
-        } catch (e) {
-            console.error('Error de lectura:', e.message);
-            break;
-        } finally {
-            reader?.releaseLock();
-            reader = null;
+        } catch (error) {
+            if (keepReading) {
+                readError = `USB: ${error.message}`;
+                console.error('Error de lectura USB:', error.message);
+            }
+        }
+    } else {
+        while (serialPort?.readable && keepReading) {
+            try {
+                reader = serialPort.readable.getReader();
+                while (keepReading) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    if (value) handleBytes(value);
+                }
+            } catch (error) {
+                if (keepReading) {
+                    readError = `Serie: ${error.message}`;
+                    console.error('Error de lectura:', error.message);
+                }
+                break;
+            } finally {
+                reader?.releaseLock();
+                reader = null;
+            }
         }
     }
-    if (keepReading) { console.warn('Conexión perdida.'); setConnected(false); }
+    if (keepReading) {
+        console.warn('Conexión perdida.');
+        keepReading = false;
+        if (usbDevice) {
+            try { await usbDevice.close(); } catch (error) {
+                console.error('Error al cerrar el dispositivo USB:', error.message);
+            }
+            usbDevice = null;
+            usbInEndpoint = usbOutEndpoint = null;
+            usbDataInterface = usbControlInterface = null;
+        }
+        if (serialPort) {
+            const port = serialPort;
+            serialPort = null;
+            try { await port.close(); } catch (error) {
+                console.error('Error al cerrar el puerto serie:', error.message);
+            }
+        }
+        setConnected(false);
+        showConnectionError(readError || 'La conexión se interrumpió. Revisa el cable OTG y vuelve a conectar.');
+    }
+}
+
+function showConnectionError(message) {
+    connectionError.textContent = message;
+    connectionError.classList.remove('hidden');
 }
 
 // ── Parser de paquetes ────────────────────────────────────────────────────────
@@ -879,7 +1077,12 @@ function updateCameraIndicator(isOn) {
 function setConnected(on) {
     statusDot.className = 'dot ' + (on ? 'dot-on' : 'dot-off');
     statusText.textContent = on ? 'Conectado' : 'Desconectado';
-    btnConnect.classList.toggle('hidden', on);
+    if (on) {
+        connectionError.textContent = '';
+        connectionError.classList.add('hidden');
+    }
+    btnConnect.classList.toggle('hidden', on || !('serial' in navigator));
+    btnUsbConnect.classList.toggle('hidden', on || !('usb' in navigator));
     btnDisconnect.classList.toggle('hidden', !on);
     btnRecStart.disabled = !on;
     btnRecTimed.disabled = !on;

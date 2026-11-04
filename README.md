@@ -11,4 +11,7 @@ Graficador y monitor de señales ADC por puerto COM (CDC USB / Web Serial API) p
 - Exportación y registro a CSV.
 
 ## Uso
-Abrir `index.html` en un navegador compatible con la **Web Serial API** (Google Chrome, Microsoft Edge, Opera).
+Abrir `index.html` desde un contexto seguro (por ejemplo, HTTPS) en Chrome, Edge u Opera.
+
+- En PC, usar **Conectar por serie** (Web Serial API).
+- En Android, conectar el dispositivo mediante un adaptador OTG y usar **Conectar por USB** (WebUSB). El navegador debe permitir WebUSB y el dispositivo debe identificarse como STM32 `VID 0x0483 / PID 0x5740`.
