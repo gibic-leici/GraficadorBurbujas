@@ -1,134 +1,29 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Test puertos serie Bluetooth</title>
-<style>
-  body{font-family:system-ui,sans-serif;margin:0;padding:16px;max-width:640px;background:#111;color:#eee}
-  h1{font-size:1.2rem;margin:0 0 12px}
-  button{font-size:1rem;padding:10px 14px;margin:4px 4px 4px 0;border:0;border-radius:8px;background:#2a7de1;color:#fff}
-  button.sec{background:#444}
-  label{display:block;margin:8px 0}
-  input[type=text]{width:100%;box-sizing:border-box;padding:8px;border-radius:6px;border:1px solid #555;background:#222;color:#eee}
-  .box{background:#1c1c1c;border:1px solid #333;border-radius:8px;padding:10px;margin:10px 0;font-size:.9rem}
-  .ok{color:#6c6}.err{color:#f77}
-  pre{white-space:pre-wrap;word-break:break-all;margin:0;font-size:.85rem}
-  li{margin:6px 0}
-  details.help{background:#2b2410;border:1px solid #6b5a1e;border-radius:8px;padding:10px;margin:10px 0;font-size:.9rem}
-  details.help summary{cursor:pointer;font-weight:600}
-  details.help ol{margin:8px 0 0;padding-left:20px}
-</style>
-</head>
-<body>
-<h1>Test de puertos serie Bluetooth</h1>
-
-<div id="support" class="box"></div>
-
-<label>UUID de servicio (SPP estándar por defecto)
-  <input type="text" id="uuid" value="00001101-0000-1000-8000-00805f9b34fb">
-</label>
-<label><input type="checkbox" id="nofilter"> Sin filtro (mostrar todos los puertos, incluso USB)</label>
-
-<button id="btnPick">Elegir puerto…</button>
-<button id="btnRefresh" class="sec">Ver puertos ya autorizados</button>
-
-<details class="help" id="help">
-  <summary>¿No aparece ningún dispositivo? Revisá esto</summary>
-  <ol>
-    <li><b>Permiso de Chrome:</b> Ajustes de Android → Apps → Chrome → Permisos → <i>Dispositivos cercanos</i> → Permitir (en Android antiguo: <i>Ubicación</i>). Reiniciá Chrome después de cambiarlo.</li>
-    <li><b>Bluetooth activado</b> y el módulo (HC-05) encendido, cerca y ya emparejado en Ajustes → Bluetooth.</li>
-    <li>Probá con la casilla <i>Sin filtro</i> por si el módulo usa otro UUID.</li>
-    <li>Chrome actualizado (versión 137 o superior).</li>
-  </ol>
-</details>
-
-<div class="box"><b>Puertos autorizados</b><ul id="list"></ul></div>
-<div class="box"><b>Log</b><pre id="log"></pre></div>
+<button id="conectar">Conectar</button>
+<button id="enviar">Enviar</button>
+<pre id="log"></pre>
 
 <script>
-const $ = id => document.getElementById(id);
-const logEl = $('log');
-const log = (m, cls) => {
-  const t = new Date().toLocaleTimeString();
-  logEl.innerHTML += `<span class="${cls||''}">[${t}] ${m}</span>\n`;
-};
+let port, writer;
 
-const supported = 'serial' in navigator;
-$('support').innerHTML = supported
-  ? '<span class="ok">Web Serial disponible.</span> Contexto seguro: ' + window.isSecureContext
-  : '<span class="err">Este navegador no expone navigator.serial.</span> Probá con Chrome actualizado (HTTPS).';
+document.getElementById('conectar').onclick = async () => {
+  port = await navigator.serial.requestPort(); // opcional: {filters:[{usbVendorId:0x0483}]}
+  await port.open({ baudRate: 115200 });
 
-let ports = [];
+  writer = port.writable.getWriter();
 
-function describe(p) {
-  const i = p.getInfo();
-  const parts = [];
-  if (i.bluetoothServiceClassId) parts.push('Bluetooth, servicio ' + i.bluetoothServiceClassId);
-  if (i.usbVendorId !== undefined) parts.push('USB VID:0x' + i.usbVendorId.toString(16).padStart(4,'0') +
-      ' PID:0x' + (i.usbProductId||0).toString(16).padStart(4,'0'));
-  return parts.join(' · ') || 'sin información';
-}
-
-async function renderList() {
-  const ul = $('list');
-  ul.innerHTML = '';
-  ports = await navigator.serial.getPorts();
-  if (!ports.length) { ul.innerHTML = '<li>(ninguno todavía)</li>'; return; }
-  ports.forEach((p, idx) => {
-    const li = document.createElement('li');
-    li.textContent = `#${idx+1}: ${describe(p)} `;
-    const b = document.createElement('button');
-    b.className = 'sec'; b.textContent = 'Probar apertura';
-    b.onclick = () => testOpen(p);
-    li.appendChild(b);
-    ul.appendChild(li);
-  });
-}
-
-async function testOpen(p) {
-  try {
-    await p.open({ baudRate: 115200 }); // se ignora en Bluetooth, pero es obligatorio
-    log('Puerto abierto: ' + describe(p), 'ok');
-    const reader = p.readable.getReader();
-    const t = setTimeout(() => reader.cancel(), 3000);
-    let n = 0;
-    try {
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        n += value.length;
-      }
-    } finally { clearTimeout(t); reader.releaseLock(); }
-    log(`Bytes recibidos en 3 s: ${n}`);
-    await p.close();
-    log('Puerto cerrado.');
-  } catch (e) {
-    log('Error al abrir/leer: ' + e.name + ': ' + e.message, 'err');
-  }
-}
-
-$('btnPick').onclick = async () => {
-  if (!supported) return log('Web Serial no disponible.', 'err');
-  try {
-    const opts = $('nofilter').checked ? {} :
-      { filters: [{ bluetoothServiceClassId: $('uuid').value.trim() }] };
-    const p = await navigator.serial.requestPort(opts);
-    log('Puerto elegido: ' + describe(p), 'ok');
-    await renderList();
-  } catch (e) {
-    log(e.name + ': ' + e.message, 'err');
-    if (e.name === 'NotFoundError') {
-      // El usuario cerró el selector o no había dispositivos compatibles.
-      $('help').open = true;
-      $('help').scrollIntoView({ behavior: 'smooth', block: 'center' });
-      log('No se eligió ningún puerto. Si el selector estaba vacío, revisá el panel de ayuda.');
+  // Lectura continua
+  const decoder = new TextDecoder();
+  const reader = port.readable.getReader();
+  (async () => {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      document.getElementById('log').textContent += decoder.decode(value);
     }
-  }
+  })();
 };
 
-$('btnRefresh').onclick = () => supported && renderList();
-if (supported) renderList();
+document.getElementById('enviar').onclick = async () => {
+  await writer.write(new TextEncoder().encode("hola\r\n"));
+};
 </script>
-</body>
-</html>
