@@ -33,7 +33,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 // ── Estado ───────────────────────────────────────────────────────────────────
 let serialPort = null, usbDevice = null, reader = null, keepReading = false;
 let usbInEndpoint = null, usbOutEndpoint = null;
-let usbDataInterface = null, usbControlInterface = null;
+let usbDataInterface = null;
 let rxBuffer = new Uint8Array(65536);
 let rxLen = 0;
 let syncErrors = 0;
@@ -363,17 +363,17 @@ async function connectSerial() {
     }
 }
 
+function hasBulkEndpoints(alternate) {
+    return alternate.endpoints.some(endpoint => endpoint.type === 'bulk' && endpoint.direction === 'in')
+        && alternate.endpoints.some(endpoint => endpoint.type === 'bulk' && endpoint.direction === 'out');
+}
+
 function findUsbInterface(configuration, interfaceClass) {
     for (const usbInterface of configuration.interfaces) {
         const alternate = usbInterface.alternates.find(item => item.interfaceClass === interfaceClass);
         if (alternate) return { usbInterface, alternate };
     }
     return null;
-}
-
-function hasBulkEndpoints(alternate) {
-    return alternate.endpoints.some(endpoint => endpoint.type === 'bulk' && endpoint.direction === 'in')
-        && alternate.endpoints.some(endpoint => endpoint.type === 'bulk' && endpoint.direction === 'out');
 }
 
 async function openUsbDevice(device) {
@@ -404,17 +404,63 @@ async function openUsbDevice(device) {
         throw new Error('No se encontró una interfaz USB con endpoints bulk de entrada y salida.');
     }
 
-    usbControlInterface = findUsbInterface(configuration, 0x02);
-    const interfacesToClaim = [usbDataInterface];
-    if (usbControlInterface
-        && usbControlInterface.usbInterface.interfaceNumber !== usbDataInterface.usbInterface.interfaceNumber) {
-        interfacesToClaim.push(usbControlInterface);
+    const { usbInterface, alternate } = usbDataInterface;
+    try {
+        await device.claimInterface(usbInterface.interfaceNumber);
+    } catch (error) {
+        throw new Error(
+            `Android no permitió reclamar la interfaz USB ${usbInterface.interfaceNumber} ` +
+            `(clase 0x${alternate.interfaceClass.toString(16).padStart(2, '0')}). ` +
+            `Puede estar ocupada por el controlador del sistema. ${error.message}`
+        );
+    }
+    if (alternate.alternateSetting !== 0) {
+        await device.selectAlternateInterface(usbInterface.interfaceNumber, alternate.alternateSetting);
     }
 
-    for (const { usbInterface, alternate } of interfacesToClaim) {
-        await device.claimInterface(usbInterface.interfaceNumber);
-        if (alternate.alternateSetting !== 0) {
-            await device.selectAlternateInterface(usbInterface.interfaceNumber, alternate.alternateSetting);
+    const usbControlInterface = findUsbInterface(configuration, 0x02);
+    if (usbControlInterface) {
+        const controlInterfaceNumber = usbControlInterface.usbInterface.interfaceNumber;
+        let controlInterfaceClaimed = controlInterfaceNumber === usbInterface.interfaceNumber;
+        if (!controlInterfaceClaimed) {
+            try {
+                await device.claimInterface(controlInterfaceNumber);
+                controlInterfaceClaimed = true;
+            } catch (error) {
+                console.warn(
+                    `No se pudo reclamar la interfaz de control CDC ${controlInterfaceNumber}; ` +
+                    `se continúa con la interfaz de datos: ${error.message}`
+                );
+            }
+        }
+
+        if (controlInterfaceClaimed) {
+            try {
+                const lineCoding = new Uint8Array(7);
+                new DataView(lineCoding.buffer).setUint32(0, BAUD_RATE, true);
+                lineCoding[4] = 0;
+                lineCoding[5] = 0;
+                lineCoding[6] = 8;
+                const lineResult = await device.controlTransferOut({
+                    requestType: 'class',
+                    recipient: 'interface',
+                    request: 0x20,
+                    value: 0,
+                    index: controlInterfaceNumber
+                }, lineCoding);
+                if (lineResult.status !== 'ok') throw new Error(`SET_LINE_CODING: ${lineResult.status}`);
+
+                const controlResult = await device.controlTransferOut({
+                    requestType: 'class',
+                    recipient: 'interface',
+                    request: 0x22,
+                    value: 3,
+                    index: controlInterfaceNumber
+                });
+                if (controlResult.status !== 'ok') throw new Error(`SET_CONTROL_LINE_STATE: ${controlResult.status}`);
+            } catch (error) {
+                console.warn(`No se pudo configurar la línea CDC: ${error.message}`);
+            }
         }
     }
 
@@ -424,32 +470,6 @@ async function openUsbDevice(device) {
     usbOutEndpoint = usbDataInterface.alternate.endpoints.find(endpoint =>
         endpoint.type === 'bulk' && endpoint.direction === 'out'
     ).endpointNumber;
-
-    if (usbControlInterface) {
-        const interfaceNumber = usbControlInterface.usbInterface.interfaceNumber;
-        const lineCoding = new Uint8Array(7);
-        new DataView(lineCoding.buffer).setUint32(0, BAUD_RATE, true);
-        lineCoding[4] = 0;
-        lineCoding[5] = 0;
-        lineCoding[6] = 8;
-        const lineResult = await device.controlTransferOut({
-            requestType: 'class',
-            recipient: 'interface',
-            request: 0x20,
-            value: 0,
-            index: interfaceNumber
-        }, lineCoding);
-        if (lineResult.status !== 'ok') throw new Error(`USB SET_LINE_CODING status: ${lineResult.status}`);
-
-        const controlResult = await device.controlTransferOut({
-            requestType: 'class',
-            recipient: 'interface',
-            request: 0x22,
-            value: 3,
-            index: interfaceNumber
-        });
-        if (controlResult.status !== 'ok') throw new Error(`USB SET_CONTROL_LINE_STATE status: ${controlResult.status}`);
-    }
 
     console.log('Dispositivo conectado vía WebUSB:', device.productName || device.manufacturerName || 'USB');
     startReading();
@@ -493,7 +513,7 @@ async function connectUsb() {
         }
         usbDevice = null;
         usbInEndpoint = usbOutEndpoint = null;
-        usbDataInterface = usbControlInterface = null;
+        usbDataInterface = null;
         setConnected(false);
         showConnectionError(`USB: ${error.message}`);
     }
@@ -516,7 +536,7 @@ async function disconnectSerial() {
         usbDevice = null;
     }
     usbInEndpoint = usbOutEndpoint = null;
-    usbDataInterface = usbControlInterface = null;
+    usbDataInterface = null;
     setConnected(false);
     console.log('Dispositivo desconectado.');
 }
@@ -568,7 +588,7 @@ async function readLoop() {
             }
             usbDevice = null;
             usbInEndpoint = usbOutEndpoint = null;
-            usbDataInterface = usbControlInterface = null;
+            usbDataInterface = null;
         }
         if (serialPort) {
             const port = serialPort;
