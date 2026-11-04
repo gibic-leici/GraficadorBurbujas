@@ -32,7 +32,8 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const WEB_SERIAL_POLYFILL_URL = 'https://cdn.jsdelivr.net/npm/web-serial-polyfill/+esm';
 
 // ── Estado ───────────────────────────────────────────────────────────────────
-let serialPort = null, reader = null, keepReading = false;
+let serialPort = null, reader = null, serialWriter = null, keepReading = false;
+let isClosingSerialPort = false;
 let usbSerialApi = null, usbSerialApiPromise = null;
 let activeTransport = 'serie';
 let rxBuffer = new Uint8Array(65536);
@@ -185,15 +186,12 @@ function setupEvents() {
 
 // ── Conexión serie ────────────────────────────────────────────────────────────
 async function sendDeviceCommand(cmd) {
-    if (serialPort?.writable) {
-        const writer = serialPort.writable.getWriter();
+    if (serialWriter) {
         try {
-            await writer.write(new TextEncoder().encode(cmd));
+            await serialWriter.write(new TextEncoder().encode(cmd));
             console.log(`Comando serie enviado: ${JSON.stringify(cmd)}`);
         } catch (err) {
             console.error('Error al enviar comando serie:', err.message);
-        } finally {
-            writer.releaseLock();
         }
         return;
     }
@@ -202,7 +200,7 @@ async function sendDeviceCommand(cmd) {
 }
 
 async function setExcitationFrequency(freqHz) {
-    if (!serialPort?.writable || !keepReading) {
+    if (!serialWriter || !keepReading) {
         console.warn('No se puede cambiar frecuencia: puerto serie no conectado.');
         return;
     }
@@ -217,7 +215,7 @@ async function setExcitationFrequency(freqHz) {
         console.log(`Configurando frecuencia de excitación: ${freqHz} Hz...`);
         await sendDeviceCommand(`fexc=${freqHz}\r\n`);
         await new Promise(resolve => setTimeout(resolve, 2000));
-        if (keepReading && serialPort?.writable) {
+        if (keepReading && serialWriter) {
             await sendDeviceCommand("start\r\n");
             lastPacketSeq = null;
             console.log(`Frecuencia de excitación aplicada: ${freqHz} Hz.`);
@@ -309,6 +307,19 @@ async function openSerialPort(port, { transport = 'serie', bufferSize = true } =
     }
     serialPort = port;
     activeTransport = transport;
+    try {
+        serialWriter = port.writable.getWriter();
+        reader = port.readable.getReader();
+    } catch (error) {
+        try { serialWriter?.releaseLock(); } catch { }
+        serialWriter = null;
+        reader = null;
+        serialPort = null;
+        try { await port.close(); } catch (closeError) {
+            console.error('Error al cerrar el puerto tras fallar la apertura de streams:', closeError.message);
+        }
+        throw error;
+    }
     console.log(`Puerto conectado vía ${transport}.`);
     startReading();
 
@@ -329,7 +340,7 @@ function startReading() {
     resetLostPackets();
     setConnected(true);
     keepReading = true;
-    readLoop();
+    readLoop(reader);
 }
 
 async function connectSerial() {
@@ -409,52 +420,51 @@ async function connectUsb() {
 }
 
 async function disconnectSerial() {
+    if (isClosingSerialPort) return;
+    isClosingSerialPort = true;
     keepReading = false;
-    if (reader) { try { await reader.cancel(); } catch { } }
-    await delay(150);
-    if (serialPort) {
-        try { await serialPort.close(); } catch (error) {
+    const port = serialPort;
+    const activeReader = reader;
+    const activeWriter = serialWriter;
+    serialPort = null;
+    reader = null;
+    serialWriter = null;
+
+    try { await activeReader?.cancel(); } catch { }
+    try { activeReader?.releaseLock(); } catch { }
+    try { activeWriter?.releaseLock(); } catch { }
+    if (port) {
+        try { await port.close(); } catch (error) {
             console.error('Error al cerrar el puerto serie:', error.message);
         }
-        serialPort = null;
     }
+    isClosingSerialPort = false;
     setConnected(false);
     console.log('Dispositivo desconectado.');
 }
 
-async function readLoop() {
+async function readLoop(activeReader) {
     let readError = null;
-    while (serialPort?.readable && keepReading) {
-        try {
-            reader = serialPort.readable.getReader();
-            while (keepReading) {
-                const { value, done } = await reader.read();
-                if (done) break;
-                if (value) handleBytes(value);
-            }
-        } catch (error) {
-            if (keepReading) {
-                readError = `${activeTransport}: ${error.message}`;
-                console.error('Error de lectura:', error.message);
-            }
-            break;
-        } finally {
-            reader?.releaseLock();
-            reader = null;
+    try {
+        while (keepReading) {
+            const { value, done } = await activeReader.read();
+            if (done) break;
+            if (value) handleBytes(value);
         }
-    }
-    if (keepReading) {
-        console.warn('Conexión perdida.');
-        keepReading = false;
-        if (serialPort) {
-            const port = serialPort;
-            serialPort = null;
-            try { await port.close(); } catch (error) {
-                console.error('Error al cerrar el puerto serie:', error.message);
-            }
+    } catch (error) {
+        if (keepReading) {
+            readError = `${activeTransport}: ${error.message}`;
+            console.error('Error de lectura:', error.message);
         }
-        setConnected(false);
-        showConnectionError(readError || 'La conexión se interrumpió. Revisa el cable OTG y vuelve a conectar.');
+    } finally {
+        if (keepReading) {
+            if (!readError) readError = `${activeTransport}: el dispositivo cerró el flujo de lectura.`;
+            await disconnectSerial();
+            showConnectionError(readError);
+        } else {
+            try { activeReader.releaseLock(); } catch { }
+            if (reader === activeReader) reader = null;
+        }
     }
 }
 
