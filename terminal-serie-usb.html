@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terminal serie USB</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --fg: #1b1b1a; --mut: #6b6b66; --card: #ffffff; --bord: #d9d9d3;
+    --acc: #1d6fe0; --accfg: #ffffff; --rx: #0b6b3a; --tx: #1d6fe0; --sys: #9a6700; --err: #b3261e;
+    --ok: #1a7f45;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615; --fg: #ececea; --mut: #9a9a94; --card: #1f1f1e; --bord: #34342f;
+      --acc: #5b9cff; --accfg: #0b0b0a; --rx: #5fd08e; --tx: #7db0ff; --sys: #e0b04a; --err: #ff8a80;
+      --ok: #5fd08e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0 auto; padding: 12px; max-width: 900px; min-height: 100dvh;
+    display: flex; flex-direction: column; gap: 10px;
+    background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, sans-serif;
+  }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  h1 { font-size: 1.15rem; margin: 0; font-weight: 600; }
+  .pill { font-size: .8rem; padding: 3px 10px; border-radius: 99px; border: 1px solid var(--bord); color: var(--mut); background: var(--card); }
+  .pill.on { color: var(--ok); border-color: var(--ok); }
+  .aviso { padding: 10px 12px; border-radius: 8px; border: 1px solid var(--err); color: var(--err); font-size: .9rem; }
+  .cfg { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  @media (min-width: 640px) { .cfg { grid-template-columns: repeat(4, 1fr); } }
+  label { display: flex; flex-direction: column; gap: 3px; font-size: .78rem; color: var(--mut); }
+  input[type=text], select {
+    font: inherit; font-size: 16px; color: var(--fg); background: var(--card);
+    border: 1px solid var(--bord); border-radius: 8px; padding: 9px 10px; width: 100%;
+  }
+  button {
+    font: inherit; font-size: 16px; padding: 10px 16px; border-radius: 8px;
+    border: 1px solid var(--bord); background: var(--card); color: var(--fg); cursor: pointer;
+  }
+  button.primario { background: var(--acc); color: var(--accfg); border-color: var(--acc); font-weight: 600; }
+  button:disabled, input:disabled { opacity: .5; cursor: not-allowed; }
+  .acciones { display: flex; gap: 8px; }
+  .acciones .primario { flex: 1; }
+  #log {
+    flex: 1; min-height: 240px; overflow: auto; padding: 10px;
+    background: var(--card); border: 1px solid var(--bord); border-radius: 10px;
+    font: 14px/1.45 ui-monospace, Menlo, Consolas, monospace;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  .l.rx { color: var(--rx); }
+  .l.tx { display: block; color: var(--tx); }
+  .l.sys { display: block; color: var(--sys); font-style: italic; }
+  #formEnvio { display: flex; gap: 8px; }
+  #formEnvio input { flex: 1; }
+  .opts { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; font-size: .9rem; }
+  .opts label { flex-direction: row; align-items: center; gap: 6px; font-size: .9rem; color: var(--fg); }
+  .opts select { width: auto; padding: 5px 8px; font-size: 14px; }
+  .info { font-size: .78rem; color: var(--mut); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Terminal serie USB</h1>
+  <span id="estado" class="pill">Desconectado</span>
+</header>
+
+<div id="aviso" class="aviso" hidden></div>
+
+<section class="cfg">
+  <label>VID (hex o decimal)
+    <input id="vid" type="text" value="0x0483" autocomplete="off" autocapitalize="off" spellcheck="false">
+  </label>
+  <label>PID (opcional)
+    <input id="pid" type="text" placeholder="ej. 0x5740" autocomplete="off" autocapitalize="off" spellcheck="false">
+  </label>
+  <label>Baudios
+    <select id="baud">
+      <option>9600</option><option>19200</option><option>38400</option><option>57600</option>
+      <option selected>115200</option><option>230400</option><option>460800</option><option>921600</option>
+    </select>
+  </label>
+  <label>Fin de línea al enviar
+    <select id="eol">
+      <option value="none">Ninguno</option>
+      <option value="lf">LF (\n)</option>
+      <option value="cr">CR (\r)</option>
+      <option value="crlf" selected>CR+LF (\r\n)</option>
+    </select>
+  </label>
+</section>
+
+<div class="acciones">
+  <button id="btnConectar" class="primario">Conectar</button>
+  <button id="btnLimpiar" type="button">Limpiar</button>
+</div>
+
+<div id="log" role="log" aria-live="polite"></div>
+
+<form id="formEnvio" autocomplete="off">
+  <input id="texto" type="text" placeholder="Texto a enviar…" autocapitalize="off" autocorrect="off" spellcheck="false" disabled>
+  <button id="btnEnviar" type="submit" disabled>Enviar</button>
+</form>
+
+<div class="opts">
+  <label><input id="hex" type="checkbox"> Mostrar recepción en HEX</label>
+  <label><input id="auto" type="checkbox" checked> Autoscroll</label>
+  <label>Modo
+    <select id="modo">
+      <option value="auto" selected>Automático</option>
+      <option value="nativo">Web Serial nativo</option>
+      <option value="polyfill">WebUSB (polyfill)</option>
+    </select>
+  </label>
+</div>
+<div id="info" class="info"></div>
+
+<script type="module">
+const POLYFILL_URL = 'https://cdn.jsdelivr.net/npm/web-serial-polyfill/+esm';
+const $ = (id) => document.getElementById(id);
+const EOL = { none: '', lf: '\n', cr: '\r', crlf: '\r\n' };
+const st = { port: null, reader: null, writer: null, decoder: null, cerrando: false };
+let polyfillSerial = null;
+
+/* ---------- Preferencias (opcionales, si el navegador deja guardar) ---------- */
+const guardar = (k, v) => { try { localStorage.setItem('tsu_' + k, v); } catch {} };
+const cargar = (k) => { try { return localStorage.getItem('tsu_' + k); } catch { return null; } };
+for (const id of ['vid', 'pid', 'baud', 'eol', 'modo']) {
+  const v = cargar(id);
+  if (v !== null) $(id).value = v;
+  $(id).addEventListener('change', () => guardar(id, $(id).value));
+}
+$('hex').checked = cargar('hex') === '1';
+$('hex').addEventListener('change', () => guardar('hex', $('hex').checked ? '1' : '0'));
+
+/* ---------- Log ---------- */
+const logEl = $('log');
+let ultimo = null;
+
+function añadir(tipo, texto) {
+  if (tipo === 'rx' && ultimo && ultimo.tipo === 'rx' && ultimo.el.isConnected && ultimo.el.firstChild.length < 20000) {
+    ultimo.el.firstChild.appendData(texto);
+  } else {
+    const el = document.createElement('span');
+    el.className = 'l ' + tipo;
+    el.textContent = texto;
+    logEl.appendChild(el);
+    ultimo = { tipo, el };
+  }
+  while (logEl.childNodes.length > 800) logEl.removeChild(logEl.firstChild);
+  if ($('auto').checked) logEl.scrollTop = logEl.scrollHeight;
+}
+
+$('btnLimpiar').onclick = () => { logEl.textContent = ''; ultimo = null; };
+
+/* ---------- Estado de la interfaz ---------- */
+function ui(conectado) {
+  const p = $('estado');
+  p.textContent = conectado ? 'Conectado' : 'Desconectado';
+  p.classList.toggle('on', conectado);
+  $('btnConectar').textContent = conectado ? 'Desconectar' : 'Conectar';
+  $('texto').disabled = !conectado;
+  $('btnEnviar').disabled = !conectado;
+  for (const id of ['vid', 'pid', 'baud', 'modo']) $(id).disabled = conectado;
+  if (conectado) $('texto').focus();
+}
+
+/* ---------- Selección de backend ---------- */
+const esAndroid = /Android/i.test(navigator.userAgent);
+
+async function backend() {
+  const modo = $('modo').value;
+  const usarNativo = modo === 'nativo' || (modo === 'auto' && !esAndroid);
+  if (usarNativo) {
+    if (!('serial' in navigator)) throw new Error('Este navegador no soporta Web Serial. Probá el modo WebUSB (polyfill).');
+    return { nombre: 'Web Serial nativo', api: navigator.serial };
+  }
+  if (!('usb' in navigator)) throw new Error('Este navegador no soporta WebUSB. Usá Chrome (o un navegador basado en Chromium).');
+  if (!polyfillSerial) {
+    const m = await import(POLYFILL_URL);
+    polyfillSerial = m.serial;
+  }
+  return { nombre: 'WebUSB (polyfill)', api: polyfillSerial };
+}
+
+function filtros() {
+  const vTxt = $('vid').value.trim();
+  if (!vTxt) return undefined;
+  const vid = Number(vTxt);
+  if (!Number.isInteger(vid)) return undefined;
+  const f = { usbVendorId: vid };
+  const pTxt = $('pid').value.trim();
+  if (pTxt) {
+    const pid = Number(pTxt);
+    if (Number.isInteger(pid)) f.usbProductId = pid;
+  }
+  return [f];
+}
+
+/* ---------- Conexión ---------- */
+async function abrir(b, port) {
+  const baud = Number($('baud').value);
+  await port.open({ baudRate: baud });
+  st.port = port;
+  st.decoder = new TextDecoder();
+  st.writer = port.writable.getWriter();
+  st.reader = port.readable.getReader();
+  ui(true);
+  añadir('sys', `Conectado — ${b.nombre}, ${baud} baudios`);
+  bucleLectura(st.reader);
+}
+
+async function bucleLectura(reader) {
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!value || !value.length) continue;
+      if ($('hex').checked) {
+        añadir('rx', Array.from(value, (x) => x.toString(16).padStart(2, '0')).join(' ') + ' ');
+      } else {
+        añadir('rx', st.decoder.decode(value, { stream: true }));
+      }
+    }
+  } catch (e) {
+    if (!st.cerrando) añadir('sys', 'Error de lectura: ' + (e.message || e));
+  } finally {
+    await cerrar();
+  }
+}
+
+async function cerrar() {
+  if (st.cerrando || !st.port) return;
+  st.cerrando = true;
+  const { port, reader, writer } = st;
+  try { await reader?.cancel(); } catch {}
+  try { reader?.releaseLock(); } catch {}
+  try { writer?.releaseLock(); } catch {}
+  try { await port.close(); } catch {}
+  st.port = st.reader = st.writer = null;
+  st.cerrando = false;
+  ui(false);
+  añadir('sys', 'Desconectado');
+}
+
+$('btnConectar').onclick = async () => {
+  if (st.port) { await cerrar(); return; }
+  try {
+    const b = await backend();
+    const f = filtros();
+    const port = await b.api.requestPort(f ? { filters: f } : {});
+    await abrir(b, port);
+  } catch (e) {
+    if (e && e.name === 'NotFoundError') añadir('sys', 'Se canceló la selección o no se encontró ningún dispositivo con ese VID/PID.');
+    else añadir('sys', 'Error: ' + (e.message || e));
+  }
+};
+
+/* ---------- Envío ---------- */
+$('formEnvio').onsubmit = async (ev) => {
+  ev.preventDefault();
+  if (!st.writer) { añadir('sys', 'No hay conexión.'); return; }
+  const txt = $('texto').value;
+  const datos = new TextEncoder().encode(txt + EOL[$('eol').value]);
+  try {
+    await st.writer.write(datos);
+    añadir('tx', '› ' + txt);
+    $('texto').value = '';
+  } catch (e) {
+    añadir('sys', 'Error al enviar: ' + (e.message || e));
+  }
+};
+
+/* ---------- Reconexión automática a puertos ya autorizados ---------- */
+async function autoconectar() {
+  if (st.port) return;
+  try {
+    const b = await backend();
+    let puertos = await b.api.getPorts();
+    const f = filtros();
+    if (f) {
+      puertos = puertos.filter((p) => {
+        const i = p.getInfo ? p.getInfo() : null;
+        return !i || !i.usbVendorId || i.usbVendorId === f[0].usbVendorId;
+      });
+    }
+    if (puertos.length) await abrir(b, puertos[0]);
+  } catch { /* silencioso */ }
+}
+
+if ('usb' in navigator) navigator.usb.addEventListener('connect', () => setTimeout(autoconectar, 500));
+if ('serial' in navigator) {
+  navigator.serial.addEventListener('connect', () => setTimeout(autoconectar, 500));
+  navigator.serial.addEventListener('disconnect', () => { if (st.port) cerrar(); });
+}
+
+/* ---------- Diagnóstico inicial ---------- */
+const avisos = [];
+if (!window.isSecureContext) avisos.push('La página no está en un contexto seguro: serví este archivo por HTTPS (o localhost), si no el navegador bloquea el acceso USB.');
+if (!('usb' in navigator) && !('serial' in navigator)) avisos.push('Este navegador no tiene WebUSB ni Web Serial. En Android usá Chrome; Firefox y Safari no sirven.');
+if (avisos.length) { $('aviso').hidden = false; $('aviso').textContent = avisos.join(' '); }
+
+$('info').textContent = esAndroid
+  ? 'Android detectado: en modo Automático se usa WebUSB (polyfill), porque Web Serial nativo en Android no lista puertos USB conectados por OTG.'
+  : 'En modo Automático se usa Web Serial nativo. Si el sistema no lo soporta, cambiá a WebUSB (polyfill).';
+
+// Precarga del polyfill para que el primer click en "Conectar" no pierda el gesto del usuario
+backend().then(autoconectar).catch(() => {});
+ui(false);
+</script>
+</body>
+</html>
