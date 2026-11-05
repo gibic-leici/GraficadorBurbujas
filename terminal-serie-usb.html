@@ -118,7 +118,6 @@
 <div id="info" class="info"></div>
 
 <script type="module">
-const POLYFILL_URL = 'https://cdn.jsdelivr.net/npm/web-serial-polyfill/+esm';
 const $ = (id) => document.getElementById(id);
 const EOL = { none: '', lf: '\n', cr: '\r', crlf: '\r\n' };
 const st = { port: null, reader: null, writer: null, decoder: null, cerrando: false };
@@ -178,10 +177,8 @@ async function backend() {
     return { nombre: 'Web Serial nativo', api: navigator.serial };
   }
   if (!('usb' in navigator)) throw new Error('Este navegador no soporta WebUSB. Usá Chrome (o un navegador basado en Chromium).');
-  if (!polyfillSerial) {
-    const m = await import(POLYFILL_URL);
-    polyfillSerial = m.serial;
-  }
+  polyfillSerial = window.WebSerialPolyfill?.serial;
+  if (!polyfillSerial) throw new Error('No se cargó el polyfill local de WebUSB.');
   return { nombre: 'WebUSB (polyfill)', api: polyfillSerial };
 }
 
@@ -310,5 +307,6 @@ $('info').textContent = esAndroid
 backend().then(autoconectar).catch(() => {});
 ui(false);
 </script>
+<script src="./vendor/web-serial-polyfill.js"></script>
 </body>
 </html>

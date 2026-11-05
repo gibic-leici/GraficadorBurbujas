@@ -29,13 +29,12 @@ const CH_GRADIENTS = ['rgba(79,156,249,0.07)', 'rgba(249,127,79,0.07)'];
 
 // ── Utilidades ───────────────────────────────────────────────────────────────
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-const WEB_SERIAL_POLYFILL_URL = 'https://cdn.jsdelivr.net/npm/web-serial-polyfill@1.0.15/+esm';
 const USB_READ_BUFFER_SIZE = 16384;
 
 // ── Estado ───────────────────────────────────────────────────────────────────
 let serialPort = null, reader = null, serialWriter = null, keepReading = false;
 let isClosingSerialPort = false;
-let usbSerialApi = null, usbSerialApiPromise = null;
+let usbSerialApi = null;
 let activeTransport = 'serie';
 let rxBuffer = new Uint8Array(65536);
 let rxLen = 0;
@@ -376,79 +375,13 @@ async function connectSerial() {
 }
 
 function loadUsbSerialApi() {
-    if (!usbSerialApiPromise) {
-        usbSerialApiPromise = import(WEB_SERIAL_POLYFILL_URL)
-            .then(module => {
-                if (!module.serial?.requestPort) {
-                    throw new Error('El polyfill no expone una API serie compatible.');
-                }
-                patchEmptyUsbChunkBug(module.SerialPort);
-                usbSerialApi = module.serial;
-                return usbSerialApi;
-            })
-            .catch(error => {
-                usbSerialApiPromise = null;
-                throw error;
-            });
+    if (!usbSerialApi) {
+        usbSerialApi = window.WebSerialPolyfill?.serial;
     }
-    return usbSerialApiPromise;
-}
-
-function patchEmptyUsbChunkBug(SerialPort) {
-    const descriptor = Object.getOwnPropertyDescriptor(SerialPort.prototype, 'readable');
-    if (!descriptor?.get || descriptor.configurable === false) {
-        throw new Error('No se puede corregir el flujo USB del polyfill en esta versión.');
+    if (!usbSerialApi?.requestPort) {
+        return Promise.reject(new Error('No se cargó el polyfill local de WebUSB.'));
     }
-
-    Object.defineProperty(SerialPort.prototype, 'readable', {
-        configurable: true,
-        get() {
-            if (!this.readable_ && this.device_.opened) {
-                const port = this;
-                this.readable_ = new ReadableStream({
-                    type: 'bytes',
-                    async pull(controller) {
-                        const endpoint = port.inEndpoint_;
-                        const desiredSize = controller.desiredSize;
-                        const length = desiredSize
-                            ? Math.ceil(desiredSize / endpoint.packetSize) * endpoint.packetSize
-                            : endpoint.packetSize;
-
-                        try {
-                            while (!port.readableCancelled_ && port.device_.opened) {
-                                const result = await port.device_.transferIn(endpoint.endpointNumber, length);
-                                if (port.readableCancelled_) return;
-                                if (result.status !== 'ok') {
-                                    throw new Error(`USB error: ${result.status}`);
-                                }
-                                if (result.data?.byteLength > 0) {
-                                    controller.enqueue(new Uint8Array(
-                                        result.data.buffer,
-                                        result.data.byteOffset,
-                                        result.data.byteLength
-                                    ));
-                                    return;
-                                }
-                                await delay(5);
-                            }
-                        } catch (error) {
-                            if (!port.readableCancelled_) {
-                                port.readable_ = null;
-                                controller.error(error);
-                            }
-                        }
-                    },
-                    cancel() {
-                        port.readableCancelled_ = true;
-                    }
-                }, {
-                    highWaterMark: this.serialOptions_?.bufferSize ?? 255
-                });
-                this.readableCancelled_ = false;
-            }
-            return this.readable_;
-        }
-    });
+    return Promise.resolve(usbSerialApi);
 }
 
 async function connectUsb() {

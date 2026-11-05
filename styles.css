@@ -15,7 +15,7 @@
     --red:       #f43f5e;
     --yellow:    #f5c518;
     --sidebar-w: 260px;
-    --font:      'Inter', system-ui, sans-serif;
+    --font:      system-ui, sans-serif;
 }
 
 html, body { height: 100%; font-family: var(--font); background: var(--bg); color: var(--text); font-size: 13px; }
@@ -410,3 +410,142 @@ canvas { display: block; width: 100%; height: 100%; }
 .hidden    { display: none !important; }
 .mono      { font-family: monospace; }
 .help-text { font-size: 10px; color: var(--muted); margin-top: -4px; }
+
+@media (max-width: 700px), (max-height: 500px) and (orientation: landscape) {
+    html, body {
+        height: auto;
+        min-height: 100%;
+    }
+
+    .layout {
+        display: flex;
+        flex-direction: column;
+        height: auto;
+        min-height: 100svh;
+        overflow: visible;
+        padding-bottom: env(safe-area-inset-bottom);
+    }
+
+    .sidebar {
+        display: contents;
+    }
+
+    .sidebar-header {
+        order: 0;
+        padding: 14px 14px 10px;
+        margin: 0;
+    }
+
+    .sidebar-header h1 {
+        font-size: 18px;
+    }
+
+    .connection-section {
+        order: 1;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+        padding: 8px 14px 12px;
+        border-bottom: 1px solid var(--border);
+    }
+
+    .connection-section .section-label,
+    .connection-section .help-text,
+    .connection-section .status-panel,
+    .connection-section #btn-disconnect,
+    .connection-section #connection-error {
+        grid-column: 1 / -1;
+    }
+
+    .connection-section .help-text {
+        margin: 0;
+    }
+
+    .connection-section .btn {
+        min-height: 44px;
+        padding: 10px 8px;
+        font-size: 14px;
+    }
+
+    .status-panel {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px;
+        margin-top: 0;
+    }
+
+    .status-row {
+        min-width: 0;
+        gap: 7px;
+        padding: 8px;
+        font-size: 12px;
+    }
+
+    .status-row .dot {
+        width: 12px;
+        height: 12px;
+    }
+
+    .charts {
+        order: 2;
+        display: flex;
+        flex: none;
+        flex-direction: column;
+        gap: 10px;
+        height: auto;
+        overflow: visible;
+        padding: 10px 12px 12px;
+    }
+
+    .chart-card {
+        flex: none;
+        height: clamp(220px, 34svh, 320px);
+        min-height: 220px;
+        overflow: hidden;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface);
+    }
+
+    .chart-header {
+        gap: 6px;
+        padding: 8px 10px;
+    }
+
+    .chart-header h2 {
+        font-size: 12px;
+    }
+
+    .val-badge {
+        font-size: 11px;
+        padding: 2px 6px;
+    }
+
+    .sidebar > .section:not(.connection-section) {
+        order: 3;
+        padding: 12px 14px;
+    }
+
+    .input-num {
+        min-height: 40px;
+        font-size: 16px;
+    }
+
+    .btn-freq, .btn-avg {
+        min-height: 40px;
+        font-size: 13px;
+    }
+}
+
+@media (max-height: 500px) and (orientation: landscape) {
+    .charts {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        align-items: stretch;
+    }
+
+    .chart-card {
+        height: 56svh;
+        min-height: 190px;
+    }
+}
